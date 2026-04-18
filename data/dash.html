@@ -1,0 +1,162 @@
+<!doctype html>
+  <html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard</title>
+    <style>
+      body { margin: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; background: #eef2f7; color: #0f172a; }
+      h1,h2,h3 { margin: 0 0 14px 0; color: #0f172a; }
+      .muted { color: #64748b; font-size: 13px; }
+      .app-shell { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+      .side-panel { background: linear-gradient(180deg, #0f172a 0%, #111827 100%); color: #dbeafe; padding: 22px 16px; border-right: 1px solid #1f2937; }
+      .brand-block { border-bottom: 1px solid #1f2d46; padding-bottom: 14px; margin-bottom: 16px; }
+      .brand-title { font-weight: 800; font-size: 20px; letter-spacing: .5px; color: #f8fafc; }
+      .brand-subtitle { color: #93c5fd; font-size: 13px; }
+      .side-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #93c5fd; margin-bottom: 10px; }
+      .side-links { display: flex; flex-direction: column; gap: 8px; }
+      .side-link { text-decoration: none; color: #dbeafe; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; font-weight: 600; }
+      .side-link:hover { background: #334155; }
+      .side-link.active { background: #2563eb; border-color: #3b82f6; color: #fff; }
+      .main-panel { padding: 26px; }
+      .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap: 14px; margin-bottom: 12px; }
+      .topbar-actions { display:flex; gap: 10px; align-items: center; }
+      .content-card { background: #fff; border: 1px solid #dbe3ee; border-radius: 14px; box-shadow: 0 8px 24px rgba(15, 23, 42, .06); padding: 20px; }
+      .container { max-width: 900px; margin: 40px auto; background: #fff; border: 1px solid #dbe3ee; border-radius: 14px; padding: 24px; }
+      .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 18px 0; }
+      .card { background: linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%); border: 1px solid #dbeafe; border-radius: 10px; padding: 14px; }
+      .card strong { font-size: 28px; color: #1d4ed8; display: block; margin-top: 6px; }
+      .form-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 0; }
+      input, select, textarea, button { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #c7d0db; box-sizing: border-box; }
+      input:focus, select:focus, textarea:focus { border-color: #3b82f6; outline: 2px solid #bfdbfe; }
+      button { background: #16a34a; color: #fff; border: none; cursor: pointer; font-weight: 700; }
+      button:hover { background: #15803d; }
+      .danger-button { width: auto; background: #dc2626; padding: 10px 14px; }
+      .danger-button:hover { background: #b91c1c; }
+      .btn-compact { width: auto; display: inline-block; padding: 8px 12px; font-size: 12px; border-radius: 7px; }
+      .action-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+      .module-launcher-button { width: auto; background: #0f172a; padding: 10px 14px; }
+      .module-launcher-button:hover { background: #1e293b; }
+      .module-panel { display: none; background: #0b1633; border-radius: 12px; padding: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 0 0 14px 0; }
+      .module-panel.open { display: grid; }
+      .launcher-card { text-decoration: none; background: #13224a; color: #f8fafc; border: 1px solid #213b7a; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
+      .launcher-card:hover { background: #1e3a8a; }
+      .launcher-card.active { border-color: #60a5fa; box-shadow: 0 0 0 1px #60a5fa inset; }
+      .launcher-card span { color: #cbd5e1; font-size: 12px; }
+      table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+      th { background: #f8fafc; color: #334155; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+      th, td { border-bottom: 1px solid #e5e7eb; text-align: left; padding: 11px; font-size: 14px; }
+      .badge { display:inline-block; padding: 4px 8px; border-radius: 999px; background: #dbeafe; color: #1e40af; font-size: 12px; font-weight: 700; }
+      .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+      .login-box { max-width: 450px; width: 100%; background: #fff; border-radius: 14px; box-shadow: 0 16px 38px rgba(15, 23, 42, .14); padding: 24px; border: 1px solid #e2e8f0; }
+      .login-title { font-size: 28px; margin-bottom: 5px; }
+      .error { color: #b91c1c; margin-bottom: 10px; }
+      .ok { color: #166534; margin-bottom: 10px; }
+      @media (max-width: 980px) {
+        .app-shell { grid-template-columns: 1fr; }
+        .side-panel { border-right: 0; border-bottom: 1px solid #1f2937; }
+        .main-panel { padding: 16px; }
+        .topbar { flex-direction: column; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="side-panel">
+        <div class="brand-block">
+          <div class="brand-title">POST VENTA</div>
+          <div class="brand-subtitle">Electrodomesticos</div>
+        </div>
+        <div class="side-section-title">Inicio</div>
+        <div class="side-links"><a class="side-link active" href="/dashboard">Dashboard</a></div>
+      </aside>
+      <main class="main-panel">
+        <div class="topbar">
+          <div>
+            <h2>Dashboard Post Venta</h2>
+            <div class="muted">Resumen operativo y registro rapido de casos</div>
+            <div class="muted">Empresa: <strong>ALLIN GROUP - JAVIER PRADO S.A.</strong> | Usuario: admin</div>
+          </div>
+          <div class="topbar-actions">
+            <button type="button" class="module-launcher-button" onclick="toggleModulePanel()">Abrir modulos</button>
+            <form method="post" action="/logout"><button type="submit" class="danger-button">Salir</button></form>
+          </div>
+        </div>
+        <div id="module-panel" class="module-panel">
+          <a class="launcher-card active" href="/dashboard">
+        <strong>Inicio</strong>
+        <span>Resumen general</span>
+      </a><a class="launcher-card" href="/modules/users">
+        <strong>Gestion de usuarios</strong>
+        <span>Usuarios y perfiles</span>
+      </a><a class="launcher-card" href="/modules/talent">
+        <strong>Talento humano</strong>
+        <span>Trabajadores</span>
+      </a><a class="launcher-card" href="/modules/logistics">
+        <strong>Logistica</strong>
+        <span>Catalogo, stock y relacion comercial</span>
+      </a>
+        </div>
+        <section class="content-card">
+          
+      <div class="row">
+        <div class="card">Total casos<strong>2</strong></div>
+        <div class="card">Abiertos<strong>1</strong></div>
+        <div class="card">En proceso<strong>1</strong></div>
+        <div class="card">Cerrados<strong>0</strong></div>
+      </div>
+      <h3>Registrar nuevo caso</h3>
+      <form method="post" action="/claims">
+        <div class="form-grid">
+          <input name="customerName" placeholder="Cliente" required />
+          <input name="product" placeholder="Electrodomestico" required />
+          <input name="issue" placeholder="Problema reportado" required />
+          <select name="status" required>
+            <option>Abierto</option>
+            <option>En proceso</option>
+            <option>Cerrado</option>
+          </select>
+        </div>
+        <button type="submit">Guardar caso</button>
+      </form>
+      <h3 style="margin-top:18px">Ultimos casos de tu empresa</h3>
+      <table>
+        <thead><tr><th>Codigo</th><th>Cliente</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr></thead>
+        <tbody><tr>
+      <td>PV-0002</td>
+      <td>Maria Rojas</td>
+      <td>Lavadora</td>
+      <td>En proceso</td>
+      <td>2026-04-16 20:12:55</td>
+    </tr><tr>
+      <td>PV-0001</td>
+      <td>Juan Perez</td>
+      <td>Refrigeradora</td>
+      <td>Abierto</td>
+      <td>2026-04-16 20:12:55</td>
+    </tr></tbody>
+      </table>
+      <h3 style="margin-top:18px">Alertas de bajo stock</h3>
+      <table>
+        <thead><tr><th>Producto</th><th>Stock actual</th><th>Minimo</th></tr></thead>
+        <tbody><tr><td>Licuadora Z</td><td>1</td><td>4</td></tr><tr><td>SADAS</td><td>2</td><td>5</td></tr><tr><td>Smart dasd LED 55&quot; UHD 4K Google TV</td><td>3</td><td>5</td></tr></tbody>
+      </table>
+        </section>
+      </main>
+    </div>
+    <script>
+      function toggleModulePanel() {
+        var panel = document.getElementById("module-panel");
+        if (!panel) return;
+        panel.classList.toggle("open");
+      }
+      document.addEventListener("click", function(event) {
+        var panel = document.getElementById("module-panel");
+        var button = document.querySelector(".module-launcher-button");
+        if (!panel || !button) return;
+        if (!panel.contains(event.target) && !button.contains(event.target)) {
+          panel.classList.remove("open");
+        }
+      });
+    </script></body>
+  </html>
