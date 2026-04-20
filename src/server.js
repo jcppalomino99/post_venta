@@ -1144,6 +1144,29 @@ async function computeRegisterExpectedCash(registerId, companyId) {
   return Math.round((Number(cashSales?.t || 0) + Number(gastos?.t || 0)) * 100) / 100;
 }
 
+/** Descarga stock por ubicacion para productos sin serie, priorizando filas con mayor saldo. */
+async function consumeInventoryLocations(companyId, productId, qty) {
+  let remaining = Math.max(0, Math.floor(Number(qty || 0)));
+  if (remaining <= 0) return;
+  const rows = await all(
+    `SELECT id, quantity FROM inventory_locations
+     WHERE company_id=? AND product_id=? AND quantity>0
+     ORDER BY quantity DESC, updated_at ASC, id ASC;`,
+    [companyId, productId]
+  );
+  for (const row of rows) {
+    if (remaining <= 0) break;
+    const available = Math.max(0, Math.floor(Number(row.quantity || 0)));
+    if (available <= 0) continue;
+    const take = Math.min(available, remaining);
+    await run(
+      "UPDATE inventory_locations SET quantity=quantity-?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND quantity>=?;",
+      [take, row.id, take]
+    );
+    remaining -= take;
+  }
+}
+
 function csvEscape(value) {
   const raw = value == null ? "" : String(value);
   return `"${raw.replaceAll('"', '""')}"`;
@@ -3561,6 +3584,7 @@ app.post("/sales/pos/checkout", requireAuth, requireModule("sales_pos"), async (
     [companyId, reg.id, userId, voucher, paymentTypeId, total, amountTendered, change]
   );
   const sale = await get("SELECT id FROM sales WHERE company_id=? AND voucher_code=?;", [companyId, voucher]);
+  const nonSerialConsumed = new Map();
   for (const ln of lines) {
     await run(
       "INSERT INTO sale_items(sale_id,product_id,quantity,unit_price,total,product_serial_id) VALUES (?,?,?,?,?,?);",
@@ -3572,6 +3596,10 @@ app.post("/sales/pos/checkout", requireAuth, requireModule("sales_pos"), async (
       companyId,
     ]);
     if (ln.serialId) {
+      const serialLoc = await get(
+        "SELECT deposit_id, sector_id FROM product_serials WHERE id=? AND company_id=?;",
+        [ln.serialId, companyId]
+      );
       await run("UPDATE product_serials SET status='VENDIDO' WHERE id=? AND company_id=? AND status='EN_STOCK';", [
         ln.serialId,
         companyId,
@@ -3580,11 +3608,25 @@ app.post("/sales/pos/checkout", requireAuth, requireModule("sales_pos"), async (
       if (!okSer) {
         return res.redirect("/sales/pos?error=Serie+ya+no+disponible+reintente");
       }
+      if (serialLoc?.deposit_id && serialLoc?.sector_id) {
+        await run(
+          `UPDATE inventory_locations
+           SET quantity = CASE WHEN quantity>0 THEN quantity-1 ELSE 0 END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE company_id=? AND product_id=? AND deposit_id=? AND sector_id=?;`,
+          [companyId, ln.productId, Number(serialLoc.deposit_id), Number(serialLoc.sector_id)]
+        );
+      }
+    } else {
+      nonSerialConsumed.set(ln.productId, (nonSerialConsumed.get(ln.productId) || 0) + Number(ln.quantity || 0));
     }
     await run(
       "INSERT INTO stock_movements(company_id,product_id,movement_type,quantity,note) VALUES (?,?,?,?,?);",
       [companyId, ln.productId, "SALIDA", ln.quantity, `Venta ${voucher}`]
     );
+  }
+  for (const [pid, qty] of nonSerialConsumed.entries()) {
+    await consumeInventoryLocations(companyId, pid, qty);
   }
   await run(
     "INSERT INTO cash_movements(company_id,register_id,user_id,movement_kind,amount,description,sale_id) VALUES (?,?,?,?,?,?,?);",
