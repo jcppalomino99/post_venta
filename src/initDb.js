@@ -456,6 +456,15 @@ async function bootstrap() {
     "approvals_ingresses",
     "reports",
     "kardex",
+    "company_settings",
+    "sales_cash_registers",
+    "sales_pos",
+    "sales_prices",
+    "sales_cash_movements",
+    "sales_expenses",
+    "sales_flow_categories",
+    "sales_payment_types",
+    "sales_reports",
   ];
 
   async function seedProfilesAndModulesForCompany(companyId) {

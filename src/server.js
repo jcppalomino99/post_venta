@@ -11,12 +11,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const uploadsRoot = path.join(__dirname, "..", "uploads", "products");
 const ingressDocsRoot = path.join(__dirname, "..", "uploads", "ingress-docs");
+const companyLogosRoot = path.join(__dirname, "..", "uploads", "company-logos");
 
 if (!fs.existsSync(uploadsRoot)) {
   fs.mkdirSync(uploadsRoot, { recursive: true });
 }
 if (!fs.existsSync(ingressDocsRoot)) {
   fs.mkdirSync(ingressDocsRoot, { recursive: true });
+}
+if (!fs.existsSync(companyLogosRoot)) {
+  fs.mkdirSync(companyLogosRoot, { recursive: true });
 }
 
 const upload = multer({
@@ -47,7 +51,23 @@ const uploadIngressDoc = multer({
   },
 });
 
+const uploadCompanyLogo = multer({
+  storage: multer.diskStorage({
+    destination: companyLogosRoot,
+    filename: (_, file, cb) => {
+      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+      cb(null, `${Date.now()}_${safe}`);
+    },
+  }),
+  limits: { fileSize: 4 * 1024 * 1024 },
+  fileFilter: (_, file, cb) => {
+    const ok = ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.mimetype);
+    cb(null, Boolean(ok));
+  },
+});
+
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "1mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 app.use(
   session({
@@ -151,10 +171,10 @@ function renderAppShell({
   const groups = getVisibleModuleGroups(allowedModules);
   const groupCards = groups
     .map((group) => {
-      const activeClass = group.key === activeGroup ? "launcher-card active" : "launcher-card";
+      const activeClass = group.key === activeGroup ? "launcher-card launcher-card--compact active" : "launcher-card launcher-card--compact";
       return `<a class="${activeClass}" href="${group.path}">
-        <strong>${group.label}</strong>
-        <span>${group.subtitle}</span>
+        <span class="launcher-card-title">${escapeHtml(group.label)}</span>
+        <span class="launcher-card-sub">${escapeHtml(group.subtitle)}</span>
       </a>`;
     })
     .join("");
@@ -172,7 +192,8 @@ function renderAppShell({
 
   return `
     <div class="app-shell">
-      <aside class="side-panel">
+      <div class="nav-drawer-backdrop" id="navDrawerBackdrop" onclick="closeNavDrawer()" aria-hidden="true"></div>
+      <aside class="side-panel" id="navDrawer" aria-label="Menu lateral">
         <div class="brand-block">
           <div class="brand-title">POST VENTA</div>
           <div class="brand-subtitle">Electrodomesticos</div>
@@ -182,20 +203,24 @@ function renderAppShell({
       </aside>
       <main class="main-panel">
         <div class="topbar">
-          <div>
-            <h2>${escapeHtml(title)}</h2>
-            <div class="muted">${escapeHtml(subtitle || "")}</div>
-            <div class="muted">Empresa: <strong>${escapeHtml(companyName || "")}</strong> | Usuario: ${escapeHtml(
-              username || ""
-            )}</div>
-          </div>
+          <button type="button" class="menu-burger" id="menuBurger" onclick="toggleNavDrawer(event)" aria-expanded="false" aria-controls="navDrawer" aria-label="Abrir menu">&#9776;</button>
+          <div class="topbar-spacer" aria-hidden="true"></div>
           <div class="topbar-actions">
-            <button type="button" class="module-launcher-button" onclick="toggleModulePanel()">Abrir modulos</button>
+            <div class="module-launcher-wrap">
+              <button type="button" class="module-launcher-button" id="moduleLauncherBtn" onclick="toggleModulePanel(event)" aria-expanded="false" aria-haspopup="dialog">Modulos</button>
+              <div id="module-panel-backdrop" class="module-panel-backdrop" onclick="closeModulePanel()" aria-hidden="true"></div>
+              <div id="module-panel" class="module-panel" role="dialog" aria-modal="true" aria-labelledby="modulePanelTitle">
+                <div class="module-panel-header">
+                  <span id="modulePanelTitle">Ir a modulo</span>
+                  <button type="button" class="module-panel-close" onclick="closeModulePanel()" aria-label="Cerrar">&times;</button>
+                </div>
+                <div class="module-panel-grid">
+                  ${groupCards || "<p class='muted module-panel-empty'>No tienes modulos habilitados.</p>"}
+                </div>
+              </div>
+            </div>
             <form method="post" action="/logout"><button type="submit" class="danger-button">Salir</button></form>
           </div>
-        </div>
-        <div id="module-panel" class="module-panel">
-          ${groupCards || "<p class='muted'>No tienes modulos habilitados.</p>"}
         </div>
         <section class="content-card">
           ${body}
@@ -203,17 +228,63 @@ function renderAppShell({
       </main>
     </div>
     <script>
-      function toggleModulePanel() {
+      function refreshOverlayBodyLock() {
+        var mod = document.getElementById("module-panel") && document.getElementById("module-panel").classList.contains("open");
+        var nav = document.getElementById("navDrawer") && document.getElementById("navDrawer").classList.contains("open");
+        var on = mod || nav;
+        document.body.classList.toggle("nav-drawer-lock", on);
+        document.body.classList.toggle("module-panel-scroll-lock", on);
+      }
+      function setNavDrawerOpen(open) {
+        var d = document.getElementById("navDrawer");
+        var b = document.getElementById("navDrawerBackdrop");
+        var m = document.getElementById("menuBurger");
+        if (!d) return;
+        d.classList.toggle("open", open);
+        if (b) b.classList.toggle("open", open);
+        if (m) m.setAttribute("aria-expanded", open ? "true" : "false");
+        refreshOverlayBodyLock();
+      }
+      function toggleNavDrawer(ev) {
+        if (ev) ev.stopPropagation();
+        var d = document.getElementById("navDrawer");
+        if (!d) return;
+        setNavDrawerOpen(!d.classList.contains("open"));
+      }
+      function closeNavDrawer() {
+        setNavDrawerOpen(false);
+      }
+      function setModulePanelOpen(open) {
+        var panel = document.getElementById("module-panel");
+        var back = document.getElementById("module-panel-backdrop");
+        var btn = document.getElementById("moduleLauncherBtn");
+        if (!panel) return;
+        panel.classList.toggle("open", open);
+        if (back) back.classList.toggle("open", open);
+        if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+        refreshOverlayBodyLock();
+      }
+      function toggleModulePanel(ev) {
+        if (ev) ev.stopPropagation();
         var panel = document.getElementById("module-panel");
         if (!panel) return;
-        panel.classList.toggle("open");
+        setModulePanelOpen(!panel.classList.contains("open"));
+      }
+      function closeModulePanel() {
+        setModulePanelOpen(false);
       }
       document.addEventListener("click", function(event) {
+        var wrap = document.querySelector(".module-launcher-wrap");
         var panel = document.getElementById("module-panel");
-        var button = document.querySelector(".module-launcher-button");
-        if (!panel || !button) return;
-        if (!panel.contains(event.target) && !button.contains(event.target)) {
-          panel.classList.remove("open");
+        if (!panel || !wrap) return;
+        if (panel.classList.contains("open") && !wrap.contains(event.target)) {
+          closeModulePanel();
+        }
+      });
+      document.addEventListener("keydown", function(e) {
+        if (e.key === "Escape") {
+          closeModulePanel();
+          closeNavDrawer();
         }
       });
     </script>`;
@@ -229,6 +300,12 @@ async function ensureSchema() {
   `);
   try {
     await run("ALTER TABLE companies ADD COLUMN ruc TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN logo_path TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN cash_reopen_days INTEGER NOT NULL DEFAULT 7;");
   } catch {}
 
   await run(`
@@ -635,6 +712,166 @@ async function ensureSchema() {
   try {
     await run("ALTER TABLE purchases ADD COLUMN ingress_rejected_by_user_id INTEGER;");
   } catch {}
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS payment_types (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      is_izipay INTEGER NOT NULL DEFAULT 0,
+      izipay_merchant_code TEXT,
+      izipay_rsa_public_key TEXT,
+      izipay_sandbox INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      UNIQUE(company_id, code)
+    );
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS cash_flow_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'EGRESO',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      UNIQUE(company_id, name)
+    );
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS cash_registers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      accounting_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ABIERTA',
+      opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      closed_at TEXT,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+  `);
+  try {
+    await run("ALTER TABLE cash_registers ADD COLUMN branch_id INTEGER;");
+  } catch {}
+  try {
+    await run("ALTER TABLE cash_registers ADD COLUMN close_expected_cash REAL;");
+  } catch {}
+  try {
+    await run("ALTER TABLE cash_registers ADD COLUMN close_counted_cash REAL;");
+  } catch {}
+  try {
+    await run("ALTER TABLE cash_registers ADD COLUMN close_recount_json TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE cash_registers ADD COLUMN close_other_digital REAL;");
+  } catch {}
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS branches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVO',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      UNIQUE(company_id, name)
+    );
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS sales (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      register_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      voucher_code TEXT NOT NULL,
+      payment_type_id INTEGER NOT NULL,
+      total REAL NOT NULL,
+      amount_tendered REAL NOT NULL DEFAULT 0,
+      change_amount REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'COMPLETADA',
+      izipay_transaction_id TEXT,
+      izipay_response_json TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      FOREIGN KEY(register_id) REFERENCES cash_registers(id),
+      FOREIGN KEY(user_id) REFERENCES users(id),
+      FOREIGN KEY(payment_type_id) REFERENCES payment_types(id),
+      UNIQUE(company_id, voucher_code)
+    );
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      unit_price REAL NOT NULL,
+      total REAL NOT NULL,
+      FOREIGN KEY(sale_id) REFERENCES sales(id),
+      FOREIGN KEY(product_id) REFERENCES products(id)
+    );
+  `);
+  try {
+    await run("ALTER TABLE sale_items ADD COLUMN product_serial_id INTEGER;");
+  } catch {}
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS cash_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      register_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      movement_kind TEXT NOT NULL,
+      amount REAL NOT NULL,
+      description TEXT,
+      sale_id INTEGER,
+      expense_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      FOREIGN KEY(register_id) REFERENCES cash_registers(id),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      register_id INTEGER NOT NULL,
+      category_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id),
+      FOREIGN KEY(register_id) REFERENCES cash_registers(id),
+      FOREIGN KEY(category_id) REFERENCES cash_flow_categories(id),
+      FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS cash_denominations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      value REAL NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES companies(id)
+    );
+  `);
 }
 
 const MODULES = [
@@ -659,6 +896,16 @@ const MODULES = [
   { key: "approvals_ingresses", label: "Aprobacion Ingresos" },
   { key: "reports", label: "Reportes" },
   { key: "kardex", label: "Kardex" },
+  { key: "company_settings", label: "Mi empresa" },
+  { key: "sales_cash_registers", label: "Cajas" },
+  { key: "sales_pos", label: "Post venta (POS)" },
+  { key: "sales_prices", label: "Precios venta" },
+  { key: "sales_cash_movements", label: "Movimientos caja" },
+  { key: "sales_expenses", label: "Gastos" },
+  { key: "sales_flow_categories", label: "Tipos ingreso/gasto" },
+  { key: "sales_cash_denominations", label: "Monedas/billetes" },
+  { key: "sales_payment_types", label: "Tipos de pago" },
+  { key: "sales_reports", label: "Reportes ventas" },
 ];
 
 const MODULE_GROUPS = [
@@ -708,6 +955,34 @@ const MODULE_GROUPS = [
       { moduleKey: "approvals_ingresses", label: "Aprob. Ingresos", path: "/approvals/ingresses" },
       { moduleKey: "reports", label: "Reportes", path: "/reports" },
       { moduleKey: "kardex", label: "Kardex", path: "/kardex" },
+    ],
+  },
+  {
+    key: "company",
+    label: "Empresa",
+    subtitle: "Datos y marca",
+    path: "/modules/company",
+    sections: [
+      { moduleKey: "company_settings", label: "Mi empresa", path: "/company" },
+      { moduleKey: "sales_cash_denominations", label: "Monedas/billetes", path: "/sales/cash-denominations" },
+    ],
+  },
+  {
+    key: "sales",
+    label: "Ventas",
+    subtitle: "Caja, POS, precios y gastos",
+    path: "/modules/sales",
+    sections: [
+      { moduleKey: "sales_cash_registers", label: "Cajas", path: "/sales/cash-registers" },
+      { moduleKey: "sales_cash_registers", label: "Arqueo de cajas", path: "/sales/cash-audit" },
+      { moduleKey: "sales_pos", label: "Post venta (POS)", path: "/sales/pos" },
+      { moduleKey: "sales_prices", label: "Precios venta", path: "/sales/prices" },
+      { moduleKey: "sales_cash_movements", label: "Movs. caja", path: "/sales/cash-movements" },
+      { moduleKey: "sales_expenses", label: "Gastos", path: "/sales/expenses" },
+      { moduleKey: "sales_flow_categories", label: "Tipos ingreso/gasto", path: "/sales/flow-categories" },
+      { moduleKey: "sales_cash_denominations", label: "Monedas/billetes", path: "/sales/cash-denominations" },
+      { moduleKey: "sales_payment_types", label: "Tipos de pago", path: "/sales/payment-types" },
+      { moduleKey: "sales_reports", label: "Reportes ventas", path: "/sales/reports" },
     ],
   },
 ];
@@ -813,6 +1088,62 @@ async function isApprover(companyId, userId) {
   return Boolean(approver);
 }
 
+/** Denominaciones soles (PEN) para reconteo de cierre de caja. */
+const PEN_CLOSE_DENOMINATIONS = [
+  { label: "200 soles", value: 200 },
+  { label: "100 soles", value: 100 },
+  { label: "50 soles", value: 50 },
+  { label: "20 soles", value: 20 },
+  { label: "10 soles", value: 10 },
+  { label: "5 soles", value: 5 },
+  { label: "2 soles", value: 2 },
+  { label: "1 sol", value: 1 },
+  { label: "50 centimos", value: 0.5 },
+  { label: "20 centimos", value: 0.2 },
+  { label: "10 centimos", value: 0.1 },
+  { label: "5 centimos", value: 0.05 },
+  { label: "1 centimo", value: 0.01 },
+];
+
+function cashRecountQtyFieldName(denomId) {
+  return `dq_id_${Number(denomId)}`;
+}
+
+async function getCashDenominations(companyId, onlyActive = true) {
+  const where = onlyActive ? "AND active=1" : "";
+  return all(
+    `SELECT id, name, value, active, sort_order
+     FROM cash_denominations
+     WHERE company_id=? ${where}
+     ORDER BY sort_order, value DESC, id;`,
+    [companyId]
+  );
+}
+
+async function getCompanyCashReopenDays(companyId) {
+  const row = await get("SELECT IFNULL(cash_reopen_days, 7) AS d FROM companies WHERE id=?;", [companyId]);
+  const n = Math.floor(Number(row?.d ?? 7));
+  if (!Number.isFinite(n)) return 7;
+  return Math.min(365, Math.max(1, n));
+}
+
+/** Efectivo esperado en caja: ventas no Izipay + movimientos de gasto (negativos). */
+async function computeRegisterExpectedCash(registerId, companyId) {
+  const cashSales = await get(
+    `SELECT IFNULL(SUM(s.total), 0) AS t
+     FROM sales s
+     JOIN payment_types pt ON pt.id = s.payment_type_id
+     WHERE s.register_id = ? AND s.company_id = ? AND IFNULL(pt.is_izipay, 0) = 0;`,
+    [registerId, companyId]
+  );
+  const gastos = await get(
+    `SELECT IFNULL(SUM(amount), 0) AS t FROM cash_movements
+     WHERE register_id = ? AND company_id = ? AND movement_kind = 'GASTO';`,
+    [registerId, companyId]
+  );
+  return Math.round((Number(cashSales?.t || 0) + Number(gastos?.t || 0)) * 100) / 100;
+}
+
 function csvEscape(value) {
   const raw = value == null ? "" : String(value);
   return `"${raw.replaceAll('"', '""')}"`;
@@ -864,6 +1195,166 @@ async function nextIngressReceiptCode(companyId) {
     if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
   }
   return `${prefix}${String(maxSeq + 1).padStart(5, "0")}`;
+}
+
+async function nextSaleVoucherCode(companyId) {
+  const co = String(companyId).padStart(3, "0");
+  const prefix = `VTA-${co}-`;
+  const rows = await all("SELECT voucher_code FROM sales WHERE company_id=? AND voucher_code LIKE ?;", [
+    companyId,
+    `${prefix}%`,
+  ]);
+  let maxSeq = 0;
+  for (const r of rows) {
+    const m = String(r.voucher_code || "").match(new RegExp(`^VTA-${co}-(\\d+)$`));
+    if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
+  }
+  return `${prefix}${String(maxSeq + 1).padStart(6, "0")}`;
+}
+
+/**
+ * Catalogo POS.
+ * - Sin texto de busqueda: solo productos vendibles (precio > 0 y stock segun tipo).
+ * - Con searchQuery: todos los ACTIVO que coincidan (logistica), para poder elegir; `sellable` indica si se puede cobrar ya.
+ */
+async function loadPosProductCatalog(companyId, options = {}) {
+  const limit = Math.min(Math.max(Number(options.limit) || 800, 1), 2500);
+  const searchRaw = options.searchQuery != null ? String(options.searchQuery).trim() : "";
+  const stockClause = `AND (
+    (IFNULL(p.requires_serial,0) = 1 AND EXISTS (
+      SELECT 1 FROM product_serials ps WHERE ps.company_id = p.company_id AND ps.product_id = p.id AND ps.status = 'EN_STOCK'
+    ))
+    OR (IFNULL(p.requires_serial,0) != 1 AND IFNULL(p.current_stock,0) > 0)
+  )`;
+  const priceClause = `AND IFNULL((
+    SELECT pp.price FROM product_prices pp WHERE pp.product_id = p.id AND pp.company_id = p.company_id ORDER BY datetime(pp.effective_date) DESC LIMIT 1
+  ), 0) > 0`;
+
+  let searchClause = "";
+  const params = [companyId];
+  if (searchRaw.length > 0) {
+    const tokens = searchRaw
+      .toLowerCase()
+      .split(/\s+/)
+      .map((t) => t.replace(/%/g, "").replace(/_/g, "").trim())
+      .filter((t) => t.length > 0);
+    if (tokens.length === 0) {
+      searchClause = "AND 1=0";
+    } else {
+      const hay =
+        "LOWER(COALESCE(p.name,'') || ' ' || COALESCE(p.sku,'') || ' ' || COALESCE(p.barcode,'') || ' ' || COALESCE(p.model,'') || ' ' || COALESCE(p.category,'') || ' ' || COALESCE(b.name,''))";
+      const tokenConds = [];
+      for (const t of tokens) {
+        tokenConds.push(`${hay} LIKE ?`);
+        params.push(`%${t}%`);
+      }
+      const barcodeExact = "TRIM(COALESCE(p.barcode,'')) = ?";
+      searchClause = `AND ((${tokenConds.join(" AND ")}) OR ${barcodeExact})`;
+      params.push(searchRaw.trim());
+    }
+  }
+
+  const useSellableOnly = searchRaw.length === 0;
+  const filterExtra = useSellableOnly ? `${stockClause}\n    ${priceClause}` : "";
+
+  const sql = `
+    SELECT p.id, p.name, p.sku, IFNULL(p.barcode,'') AS barcode, IFNULL(p.model,'') AS model,
+      p.current_stock, p.requires_serial,
+      (SELECT COUNT(1) FROM product_serials ps WHERE ps.company_id=p.company_id AND ps.product_id=p.id AND ps.status='EN_STOCK') AS serial_units,
+      IFNULL((SELECT pp.price FROM product_prices pp WHERE pp.product_id=p.id AND pp.company_id=p.company_id ORDER BY datetime(pp.effective_date) DESC LIMIT 1),0) AS sale_price
+    FROM products p
+    LEFT JOIN brands b ON b.id = p.brand_id AND b.company_id = p.company_id
+    WHERE p.company_id = ? AND p.status = 'ACTIVO'
+    ${filterExtra}
+    ${searchClause}
+    ORDER BY p.name
+    LIMIT ?`;
+  params.push(limit);
+  const products = await all(sql, params);
+  return products.map((p) => {
+    const salePrice = Number(p.sale_price);
+    const reqSer = Number(p.requires_serial) === 1;
+    const serialUnits = Number(p.serial_units || 0);
+    const curStock = Number(p.current_stock);
+    const stock = reqSer ? serialUnits : curStock;
+    const sellable = salePrice > 0 && (reqSer ? serialUnits > 0 : curStock > 0);
+    return {
+      id: Number(p.id),
+      name: String(p.name ?? ""),
+      sku: String(p.sku ?? ""),
+      barcode: String(p.barcode ?? ""),
+      sale_price: salePrice,
+      requires_serial: reqSer,
+      stock,
+      sellable,
+    };
+  });
+}
+
+async function getOpenCashRegister(companyId, userId) {
+  return get(
+    "SELECT * FROM cash_registers WHERE company_id=? AND user_id=? AND status='ABIERTA' ORDER BY id DESC LIMIT 1;",
+    [companyId, userId]
+  );
+}
+
+async function ensureSalesDefaults(companyId) {
+  const n = await get("SELECT COUNT(*) AS c FROM payment_types WHERE company_id=?;", [companyId]);
+  if (Number(n?.c || 0) === 0) {
+    await run(
+      `INSERT INTO payment_types(company_id,name,code,sort_order,active,is_izipay,izipay_sandbox) VALUES
+       (?,?,?,?,1,0,1),(?,?,?,?,1,0,1),(?,?,?,?,1,1,1);`,
+      [
+        companyId,
+        "Efectivo",
+        "EFECTIVO",
+        1,
+        companyId,
+        "Transferencia",
+        "TRANSFER",
+        2,
+        companyId,
+        "Tarjeta (Izipay)",
+        "TARJETA_IZIPAY",
+        3,
+      ]
+    );
+  }
+  const nc = await get("SELECT COUNT(*) AS c FROM cash_flow_categories WHERE company_id=?;", [companyId]);
+  if (Number(nc?.c || 0) === 0) {
+    await run(
+      `INSERT INTO cash_flow_categories(company_id,name,kind,sort_order,active) VALUES
+       (?,?,?,?,1),(?,?,?,?,1),(?,?,?,?,1),(?,?,?,?,1);`,
+      [
+        companyId,
+        "Comida",
+        "EGRESO",
+        1,
+        companyId,
+        "Pasaje",
+        "EGRESO",
+        2,
+        companyId,
+        "Combustible",
+        "EGRESO",
+        3,
+        companyId,
+        "Recaudo (ventas POS)",
+        "INFO",
+        4,
+      ]
+    );
+  }
+  const nd = await get("SELECT COUNT(*) AS c FROM cash_denominations WHERE company_id=?;", [companyId]);
+  if (Number(nd?.c || 0) === 0) {
+    let i = 1;
+    for (const d of PEN_CLOSE_DENOMINATIONS) {
+      await run(
+        "INSERT INTO cash_denominations(company_id,name,value,sort_order,active) VALUES (?,?,?,?,1);",
+        [companyId, d.label, Number(d.value), i++]
+      );
+    }
+  }
 }
 
 function safePdfFilename(name) {
@@ -1230,9 +1721,37 @@ function renderLayout(title, content) {
       .side-link { text-decoration: none; color: #dbeafe; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; font-weight: 600; }
       .side-link:hover { background: #334155; }
       .side-link.active { background: #2563eb; border-color: #3b82f6; color: #fff; }
-      .main-panel { padding: 26px; }
-      .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap: 14px; margin-bottom: 12px; }
-      .topbar-actions { display:flex; gap: 10px; align-items: center; }
+      .main-panel { padding: 26px; min-width: 0; }
+      .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; margin-bottom: 12px; }
+      .topbar-spacer { flex: 1; min-width: 0; }
+      .menu-burger {
+        display: none;
+        flex-shrink: 0;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        border-radius: 10px;
+        border: 1px solid #cbd5e1;
+        background: #fff;
+        color: #0f172a;
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
+        margin-top: 2px;
+      }
+      .menu-burger:hover { background: #f1f5f9; }
+      .nav-drawer-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 150;
+        background: rgba(15, 23, 42, 0.45);
+      }
+      .nav-drawer-backdrop.open { display: block; }
+      body.nav-drawer-lock { overflow: hidden; }
+      .topbar-actions { display:flex; gap: 10px; align-items: center; flex-shrink: 0; }
       .content-card { background: #fff; border: 1px solid #dbe3ee; border-radius: 14px; box-shadow: 0 8px 24px rgba(15, 23, 42, .06); padding: 20px; }
       .container { max-width: 900px; margin: 40px auto; background: #fff; border: 1px solid #dbe3ee; border-radius: 14px; padding: 24px; }
       .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 18px 0; }
@@ -1260,14 +1779,84 @@ function renderLayout(title, content) {
       .reject-inline { margin-top: 10px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fef2f2; display: flex; flex-direction: column; gap: 8px; }
       .reject-inline textarea { min-height: 76px; width: 100%; }
       .action-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
-      .module-launcher-button { width: auto; background: #0f172a; padding: 10px 14px; }
+      .module-launcher-wrap { position: relative; z-index: 100; }
+      .module-launcher-button { width: auto; background: #0f172a; padding: 8px 14px; font-size: 13px; border-radius: 8px; }
       .module-launcher-button:hover { background: #1e293b; }
-      .module-panel { display: none; background: #0b1633; border-radius: 12px; padding: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 0 0 14px 0; }
-      .module-panel.open { display: grid; }
-      .launcher-card { text-decoration: none; background: #13224a; color: #f8fafc; border: 1px solid #213b7a; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
-      .launcher-card:hover { background: #1e3a8a; }
-      .launcher-card.active { border-color: #60a5fa; box-shadow: 0 0 0 1px #60a5fa inset; }
-      .launcher-card span { color: #cbd5e1; font-size: 12px; }
+      .module-panel-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); z-index: 95; backdrop-filter: blur(2px); }
+      .module-panel-backdrop.open { display: block; }
+      .module-panel {
+        display: none;
+        position: fixed;
+        z-index: 100;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: min(440px, calc(100vw - 24px));
+        max-height: min(420px, 72vh);
+        overflow: hidden;
+        flex-direction: column;
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 14px;
+        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+      }
+      .module-panel.open { display: flex; }
+      .module-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px 8px;
+        border-bottom: 1px solid #1e293b;
+        color: #e2e8f0;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .module-panel-close {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        line-height: 1;
+        font-size: 22px;
+        border-radius: 8px;
+        background: #1e293b;
+        color: #f1f5f9;
+        border: none;
+        cursor: pointer;
+      }
+      .module-panel-close:hover { background: #334155; }
+      .module-panel-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+        padding: 10px;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .module-panel-empty { grid-column: 1 / -1; padding: 12px; text-align: center; }
+      body.module-panel-scroll-lock { overflow: hidden; }
+      .launcher-card--compact {
+        text-decoration: none;
+        background: #1e293b;
+        color: #f8fafc;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 10px 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-height: 0;
+      }
+      .launcher-card--compact:hover { background: #334155; border-color: #475569; }
+      .launcher-card--compact.active { border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8 inset; background: #1e3a5f; }
+      .launcher-card-title { font-weight: 700; font-size: 13px; line-height: 1.25; color: #f8fafc; }
+      .launcher-card-sub { font-size: 11px; line-height: 1.3; color: #94a3b8; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      @media (min-width: 520px) {
+        .module-panel-grid { grid-template-columns: repeat(3, 1fr); }
+      }
+      @media (max-width: 380px) {
+        .module-panel-grid { grid-template-columns: 1fr; }
+      }
       table { width: 100%; border-collapse: collapse; margin-top: 15px; }
       th { background: #f8fafc; color: #334155; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
       th, td { border-bottom: 1px solid #e5e7eb; text-align: left; padding: 11px; font-size: 14px; }
@@ -1279,10 +1868,201 @@ function renderLayout(title, content) {
       .ok { color: #166534; margin-bottom: 10px; }
       @media (max-width: 980px) {
         .app-shell { grid-template-columns: 1fr; }
-        .side-panel { border-right: 0; border-bottom: 1px solid #1f2937; }
-        .main-panel { padding: 16px; }
-        .topbar { flex-direction: column; }
+        .menu-burger { display: inline-flex; }
+        .side-panel {
+          position: fixed;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          width: min(292px, 90vw);
+          max-width: 100%;
+          z-index: 160;
+          transform: translateX(-105%);
+          transition: transform 0.22s ease;
+          border-right: 1px solid #1f2937;
+          border-bottom: none;
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
+          box-shadow: 12px 0 40px rgba(0, 0, 0, 0.25);
+          padding: 18px 14px;
+        }
+        .side-panel.open { transform: translateX(0); }
+        .main-panel { padding: 14px 14px 24px; }
+        .topbar { flex-wrap: wrap; align-items: flex-start; }
+        .topbar-actions { justify-content: flex-end; flex-wrap: wrap; margin-left: auto; }
+        .module-panel { width: calc(100vw - 20px); max-height: 75vh; }
+        .content-card { padding: 14px; border-radius: 12px; }
       }
+      .pos-page { margin: -4px 0 0; }
+      .pos-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+        gap: 20px;
+        align-items: start;
+      }
+      .pos-main { min-width: 0; }
+      .pos-breadcrumbs { font-size: 13px; margin-bottom: 6px; }
+      .pos-title { font-size: 22px; font-weight: 800; color: #0f172a; margin: 0 0 14px; letter-spacing: -0.02em; }
+      .pos-search-wrap label { display: block; font-size: 12px; font-weight: 700; color: #475569; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .pos-search-wrap input[type="search"] {
+        width: 100%; padding: 12px 14px; font-size: 15px; border: 1px solid #cbd5e1; border-radius: 10px;
+        box-sizing: border-box; background: #f8fafc;
+      }
+      .pos-search-wrap input[type="search"]:focus { outline: none; border-color: #0ea5e9; background: #fff; box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2); }
+      .pos-suggest {
+        margin-top: 6px; border: 1px solid #e2e8f0; border-radius: 10px; max-height: 220px; overflow-y: auto;
+        background: #fff; display: none; box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+      }
+      .pos-suggest.open { display: block; }
+      .pos-suggest-item {
+        padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #f1f5f9; font-size: 14px; display: flex; justify-content: space-between; gap: 10px; align-items: flex-start;
+      }
+      .pos-suggest-item:last-child { border-bottom: 0; }
+      .pos-suggest-item:hover, .pos-suggest-item.active { background: #f0f9ff; }
+      .pos-suggest-meta { font-size: 12px; color: #64748b; margin-top: 2px; }
+      .pos-table-wrap { margin-top: 14px; overflow-x: auto; border-radius: 10px; border: 1px solid #e2e8f0; }
+      .pos-table th.pos-th-clear,
+      .pos-table td.pos-cell-actions {
+        text-align: center;
+        vertical-align: middle;
+        width: 122px;
+        min-width: 122px;
+        max-width: 122px;
+        padding: 10px 8px;
+        box-sizing: border-box;
+      }
+      .pos-table th.pos-th-clear { border-left: 1px solid rgba(255,255,255,0.2); }
+      .pos-table td.pos-cell-actions { border-left: 1px solid #e2e8f0; background: #fafafa; }
+      .pos-table th.pos-th-clear .pos-btn-danger,
+      .pos-table td.pos-cell-actions .pos-btn-row-action {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        justify-content: center;
+        margin: 0;
+        padding: 9px 10px;
+        font-size: 12px;
+        border-radius: 9px;
+      }
+      .pos-table th.pos-th-clear .pos-btn-danger {
+        box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+      }
+      .pos-btn { border: none; border-radius: 10px; padding: 10px 16px; font-weight: 700; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+      .pos-btn-primary { background: #0284c7; color: #fff; }
+      .pos-btn-primary:hover { background: #0369a1; }
+      .pos-btn-danger { background: #dc2626; color: #fff; }
+      .pos-btn-danger:hover { background: #b91c1c; }
+      .pos-btn-ghost { background: #e2e8f0; color: #334155; }
+      .pos-table { margin-top: 0; font-size: 13px; border-collapse: collapse; width: 100%; }
+      .pos-table th {
+        background: #0d9488; color: #fff;
+        text-align: left;
+        vertical-align: middle;
+        font-weight: 700;
+      }
+      .pos-table th.pos-num { text-align: right; }
+      .pos-table th.pos-th-clear { text-align: center; }
+      .pos-table td {
+        text-align: left;
+        vertical-align: middle;
+        padding: 9px 10px;
+        border-bottom: 1px solid #f1f5f9;
+      }
+      .pos-table th { padding: 10px 10px; }
+      .pos-table td.pos-num { text-align: right; white-space: nowrap; }
+      .pos-table td.pos-col-product,
+      .pos-table th.pos-col-product { text-align: left; }
+      .pos-table td.pos-col-serie,
+      .pos-table th.pos-col-serie {
+        text-align: left;
+        font-size: 12px;
+      }
+      .pos-table .pos-qty-input {
+        width: 72px;
+        padding: 6px 8px;
+        font-size: 13px;
+        text-align: center;
+        box-sizing: border-box;
+      }
+      .pos-series-chip { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #e0f2fe; color: #075985; font-size: 11px; margin: 2px 4px 2px 0; }
+      .pos-aside {
+        position: sticky; top: 12px; border-radius: 14px; border: 1px solid #e2e8f0; background: #fff;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08); overflow: hidden;
+      }
+      .pos-aside-head {
+        padding: 16px 18px; font-size: 15px; font-weight: 800; color: #0f172a; letter-spacing: -0.02em;
+        border-bottom: 1px solid #e2e8f0; background: linear-gradient(180deg, #f8fafc 0%, #fff 100%);
+      }
+      .pos-aside form { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+      .pos-aside label { font-size: 12px; font-weight: 700; color: #475569; display: block; margin-bottom: 4px; }
+      .pos-aside select, .pos-aside input[type="number"] {
+        width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 14px;
+      }
+      .pos-summary {
+        font-size: 14px; line-height: 1.55; padding: 12px 14px; border-radius: 10px;
+        background: #f8fafc; border: 1px solid #e2e8f0;
+      }
+      .pos-summary .pos-change { color: #dc2626; font-weight: 800; }
+      .pos-checkout-total {
+        margin-top: 4px; padding: 16px 18px; border-radius: 14px;
+        background: linear-gradient(145deg, #ffffff 0%, #f0fdfa 100%);
+        border: 2px solid #0d9488; box-shadow: 0 6px 20px rgba(13, 148, 136, 0.12);
+        display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+      }
+      .pos-checkout-total span {
+        font-size: 13px; font-weight: 700; color: #134e4a; letter-spacing: 0.02em;
+      }
+      .pos-checkout-total strong {
+        font-size: 26px; font-weight: 800; color: #0f766e; letter-spacing: -0.03em; white-space: nowrap;
+      }
+      .pos-aside button[type="submit"] {
+        width: 100%; padding: 14px; font-size: 15px; font-weight: 800; border-radius: 12px; border: none;
+        background: #059669; color: #fff; cursor: pointer; margin-top: 6px;
+      }
+      .pos-aside button[type="submit"]:hover { background: #047857; }
+      .pos-help { margin: 0 16px 14px; font-size: 12px; color: #64748b; }
+      .pos-msg { font-size: 13px; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
+      .pos-msg.err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+      .pos-msg.ok { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
+      @media (max-width: 960px) {
+        .pos-layout { grid-template-columns: 1fr; gap: 14px; }
+        .pos-main { order: 1; }
+        .pos-aside { position: static; order: 2; margin-top: 4px; }
+        .pos-title { font-size: 19px; }
+        .pos-checkout-total strong { font-size: 19px; }
+        .pos-aside form { padding: 14px; gap: 10px; }
+        .pos-aside button[type="submit"] { padding: 12px; font-size: 14px; }
+      }
+      .pos-suggest-meta .pos-stock-ok { color: #047857; font-weight: 600; }
+      .pos-suggest-loading { padding: 12px; font-size: 13px; color: #64748b; }
+      .pos-suggest-warn { color: #b45309; font-size: 11px; font-weight: 700; margin-top: 4px; }
+      .pos-serial-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 220;
+        background: rgba(15, 23, 42, 0.45);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 12px;
+      }
+      .pos-serial-card { width: min(560px, 96vw); max-height: 86vh; overflow: hidden; background: #fff; border-radius: 12px; border: 1px solid #dbe3ee; display: flex; flex-direction: column; padding: 12px; }
+      .pos-serial-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+      .pos-serial-list { margin-top: 8px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+      .pos-serial-item {
+        display: grid;
+        grid-template-columns: 36px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 12px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #f1f5f9;
+        font-size: 13px;
+        box-sizing: border-box;
+      }
+      .pos-serial-item:last-child { border-bottom: none; }
+      .pos-serial-cb { display: flex; align-items: center; justify-content: center; min-height: 24px; }
+      .pos-serial-item input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: #0284c7; cursor: pointer; flex-shrink: 0; }
+      .pos-serial-label { min-width: 0; word-break: break-word; line-height: 1.35; }
     </style>
   </head>
   <body>${content}</body>
@@ -1296,6 +2076,9 @@ app.get("/", (req, res) => {
 });
 
 app.get("/login", async (req, res) => {
+  // Si otro proceso (p.ej. init/import) actualizo la BD en disco,
+  // refrescamos la instancia en memoria para reflejar empresas creadas.
+  await reloadFromDisk();
   const companies = await all("SELECT id, name FROM companies WHERE status='ACT' ORDER BY name;");
   const companyOptions = companies
     .map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
@@ -1443,6 +2226,8 @@ app.get(
     "sectors",
     "ingresses",
     "approvals_ingresses",
+    "reports",
+    "kardex",
   ]),
   async (req, res) => {
     const { companyName, username, allowedModules } = req.session.user;
@@ -1459,6 +2244,2027 @@ app.get(
     res.send(renderLayout("Logistica", html));
   }
 );
+
+app.get(
+  "/modules/company",
+  requireAuth,
+  requireAnyModule(["company_settings"]),
+  async (req, res) => {
+    const { companyName, username, allowedModules } = req.session.user;
+    const html = renderAppShell({
+      title: "Empresa",
+      subtitle: "Datos y logo corporativo",
+      companyName,
+      username,
+      allowedModules,
+      activeGroup: "company",
+      activeSection: "",
+      body: `<p class="muted">Selecciona <strong>Mi empresa</strong> en el menu lateral.</p>`,
+    });
+    res.send(renderLayout("Empresa", html));
+  }
+);
+
+app.get(
+  "/modules/sales",
+  requireAuth,
+  requireAnyModule([
+    "sales_cash_registers",
+    "sales_pos",
+    "sales_prices",
+    "sales_cash_movements",
+    "sales_expenses",
+    "sales_flow_categories",
+    "sales_payment_types",
+    "sales_reports",
+  ]),
+  async (req, res) => {
+    const { companyName, username, allowedModules } = req.session.user;
+    const html = renderAppShell({
+      title: "Ventas",
+      subtitle: "Caja, POS, precios y gastos",
+      companyName,
+      username,
+      allowedModules,
+      activeGroup: "sales",
+      activeSection: "",
+      body: `<p class="muted">Selecciona un apartado de ventas desde el menu lateral.</p>`,
+    });
+    res.send(renderLayout("Ventas", html));
+  }
+);
+
+app.get("/company", requireAuth, requireModule("company_settings"), async (req, res) => {
+  const { companyId, companyName, companyRuc, username, allowedModules } = req.session.user;
+  const ok = req.query.ok ? `<div class="ok">${escapeHtml(req.query.ok)}</div>` : "";
+  const err = req.query.error ? `<div class="error">${escapeHtml(req.query.error)}</div>` : "";
+  const co = await get(
+    "SELECT id, name, IFNULL(TRIM(ruc),'') AS ruc, IFNULL(logo_path,'') AS logo_path, IFNULL(cash_reopen_days,7) AS cash_reopen_days FROM companies WHERE id=?;",
+    [companyId]
+  );
+  const reopenDays = Number(co?.cash_reopen_days ?? 7);
+  const branches = await all(
+    "SELECT id, name, status FROM branches WHERE company_id=? ORDER BY status DESC, name;",
+    [companyId]
+  );
+  const branchRows = branches
+    .map((b) => {
+      const active = b.status === "ACTIVO";
+      return `<tr><td>${escapeHtml(b.name)}</td><td>${active ? "Activa" : "Inactiva"}</td><td>${
+        active
+          ? `<form method="post" action="/company/branches/${b.id}/deactivate" style="display:inline"><button type="submit" class="btn-compact">Desactivar</button></form>`
+          : `<form method="post" action="/company/branches/${b.id}/activate" style="display:inline"><button type="submit" class="btn-compact">Activar</button></form>`
+      }</td></tr>`;
+    })
+    .join("");
+  const logoPreview = co?.logo_path
+    ? `<p><img src="${escapeHtml(co.logo_path)}" alt="Logo" style="max-height:80px;border-radius:8px;border:1px solid #e5e7eb;" /></p>`
+    : "<p class='muted'>Sin logo cargado.</p>";
+  const html = renderAppShell({
+    title: "Mi empresa",
+    subtitle: "Nombre, RUC y logo (solo tu empresa)",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "company",
+    activeSection: "company_settings",
+    body: `${ok}${err}
+      <form method="post" action="/company" enctype="multipart/form-data">
+        <div class="form-grid">
+          <input name="name" value="${escapeHtml(co?.name || "")}" placeholder="Razon social" required />
+          <input name="ruc" value="${escapeHtml(co?.ruc || "")}" placeholder="RUC" maxlength="20" />
+          <div>
+            <label class="muted">Dias para ver / reabrir cajas cerradas (aprobadores)</label>
+            <input type="number" name="cash_reopen_days" min="1" max="365" value="${Number.isFinite(reopenDays) ? reopenDays : 7}" />
+          </div>
+          <div><label class="muted">Logo (JPG/PNG/WebP, max 4MB)</label><input type="file" name="logo" accept="image/*" /></div>
+        </div>
+        ${logoPreview}
+        <button type="submit">Guardar</button>
+      </form>
+      <h3 style="margin-top:28px">Sedes (ubicacion de caja)</h3>
+      <p class="muted" style="margin-top:4px">Al aperturar caja podra elegir la sede. Puede desactivar sedes que ya no use.</p>
+      <table style="margin-top:10px"><thead><tr><th>Nombre</th><th>Estado</th><th></th></tr></thead><tbody>${
+        branchRows || "<tr><td colspan='3' class='muted'>Sin sedes — agregue una abajo.</td></tr>"
+      }</tbody></table>
+      <form method="post" action="/company/branches/add" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+        <div><label class="muted">Nueva sede</label><input name="name" placeholder="Ej: Tienda Centro" required style="min-width:220px" /></div>
+        <button type="submit">Agregar sede</button>
+      </form>`,
+  });
+  res.send(renderLayout("Mi empresa", html));
+});
+
+app.post(
+  "/company",
+  requireAuth,
+  requireModule("company_settings"),
+  uploadCompanyLogo.single("logo"),
+  async (req, res) => {
+    const { companyId } = req.session.user;
+    const name = String(req.body.name || "").trim();
+    const ruc = String(req.body.ruc || "").trim();
+    const rdRaw = Math.floor(Number(req.body.cash_reopen_days ?? 7));
+    const cashReopenDays = Number.isFinite(rdRaw) ? Math.min(365, Math.max(1, rdRaw)) : 7;
+    if (!name) return res.redirect("/company?error=Nombre+obligatorio");
+    let logoPath = null;
+    if (req.file) {
+      logoPath = `/uploads/company-logos/${req.file.filename}`;
+      await run("UPDATE companies SET name=?, ruc=?, logo_path=?, cash_reopen_days=? WHERE id=?;", [
+        name,
+        ruc || null,
+        logoPath,
+        cashReopenDays,
+        companyId,
+      ]);
+    } else {
+      await run("UPDATE companies SET name=?, ruc=?, cash_reopen_days=? WHERE id=?;", [name, ruc || null, cashReopenDays, companyId]);
+    }
+    req.session.user.companyName = name;
+    req.session.user.companyRuc = ruc;
+    return res.redirect("/company?ok=Datos+actualizados");
+  }
+);
+
+app.post("/company/branches/add", requireAuth, requireModule("company_settings"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const nm = String(req.body.name || "").trim();
+  if (!nm) return res.redirect("/company?error=Nombre+de+sede+obligatorio");
+  try {
+    await run("INSERT INTO branches(company_id, name, status) VALUES (?,?, 'ACTIVO');", [companyId, nm]);
+  } catch {
+    return res.redirect("/company?error=Sede+duplicada+o+invalida");
+  }
+  return res.redirect("/company?ok=Sede+agregada");
+});
+
+app.post("/company/branches/:id/deactivate", requireAuth, requireModule("company_settings"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const bid = Number(req.params.id);
+  await run("UPDATE branches SET status='INACTIVO' WHERE id=? AND company_id=?;", [bid, companyId]);
+  return res.redirect("/company?ok=Sede+actualizada");
+});
+
+app.post("/company/branches/:id/activate", requireAuth, requireModule("company_settings"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const bid = Number(req.params.id);
+  await run("UPDATE branches SET status='ACTIVO' WHERE id=? AND company_id=?;", [bid, companyId]);
+  return res.redirect("/company?ok=Sede+actualizada");
+});
+
+app.get("/sales/cash-registers", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  await ensureSalesDefaults(companyId);
+  const open = await getOpenCashRegister(companyId, userId);
+  const approver = await isApprover(companyId, userId);
+  const err = req.query.error ? `<div class="error">${escapeHtml(req.query.error)}</div>` : "";
+  const ok = req.query.ok ? `<div class="ok">${escapeHtml(req.query.ok)}</div>` : "";
+  const reopenDaysHint = await getCompanyCashReopenDays(companyId);
+  const activeBranches = await all(
+    "SELECT id, name FROM branches WHERE company_id=? AND status='ACTIVO' ORDER BY name;",
+    [companyId]
+  );
+  let openForm = "";
+  if (open) {
+    const brName = open.branch_id
+      ? (await get("SELECT name FROM branches WHERE id=? AND company_id=?;", [open.branch_id, companyId]))?.name || "-"
+      : "-";
+    openForm = `<p class="ok">Caja abierta #${open.id} — sede <strong>${escapeHtml(brName)}</strong> — fecha contable <strong>${escapeHtml(
+      open.accounting_date
+    )}</strong>. Debes cerrarla para abrir otra.</p>`;
+  } else {
+    const branchField =
+      activeBranches.length > 0
+        ? `<div><label>Sede / ubicacion</label><select name="branchId" required><option value="">Elija sede...</option>${activeBranches
+            .map((b) => `<option value="${b.id}">${escapeHtml(b.name)}</option>`)
+            .join("")}</select></div>`
+        : `<p class="muted">Sin sedes activas: puede <a href="/company">configurar sedes en Mi empresa</a> (opcional).</p><input type="hidden" name="branchId" value="" />`;
+    openForm = `<form method="post" action="/sales/cash-registers/open"><div class="form-grid">${branchField}<div><label>Fecha contable</label><input type="date" name="accountingDate" required /></div></div><button type="submit">Aperturar caja</button></form>`;
+  }
+  const closedList = approver
+    ? await all(
+        `SELECT cr.id, cr.accounting_date, cr.closed_at, IFNULL(b.name,'-') AS branch_name, u.username AS cashier
+         FROM cash_registers cr
+         JOIN users u ON u.id = cr.user_id
+         LEFT JOIN branches b ON b.id = cr.branch_id
+         WHERE cr.company_id=? AND cr.status='CERRADA'
+         AND datetime(cr.closed_at) >= datetime('now', '-' || ? || ' days')
+         ORDER BY cr.closed_at DESC;`,
+        [companyId, String(reopenDaysHint)]
+      )
+    : [];
+  const closedRows = closedList
+    .map(
+      (r) => `<tr>
+      <td>${escapeHtml(r.branch_name)}</td>
+      <td>${escapeHtml(r.cashier)}</td>
+      <td>${escapeHtml(r.accounting_date)}</td>
+      <td>${escapeHtml(r.closed_at || "-")}</td>
+      <td style="white-space:nowrap">
+        <form method="post" action="/sales/cash-registers/${r.id}/reopen" style="display:inline" onsubmit="return confirm('Reabrir esta caja para el cajero?');">
+          <button type="submit" class="btn-compact">Reabrir</button>
+        </form>
+      </td>
+    </tr>`
+    )
+    .join("");
+  const approverBlock = approver
+    ? `<div style="margin-top:16px">
+       <button type="button" id="btnOpenClosedReopen" class="btn-compact">Abrir cajas cerradas</button>
+       <div id="closedReopenModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:240;padding:18px;overflow:auto">
+         <div style="max-width:980px;margin:24px auto;background:#fff;border:1px solid #dbe3ee;border-radius:12px;padding:14px">
+           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">
+             <strong>Cajas cerradas para reapertura</strong>
+             <button type="button" class="btn-compact" id="btnCloseClosedReopen">Cerrar</button>
+           </div>
+           <table><thead><tr><th>Sede</th><th>Cajero</th><th>Fecha contable</th><th>Cierre</th><th></th></tr></thead><tbody>${
+             closedRows || "<tr><td colspan='5' class='muted'>Sin cajas cerradas disponibles en el rango configurado.</td></tr>"
+           }</tbody></table>
+         </div>
+       </div>
+       <script>
+         (function(){
+           const btnOpen = document.getElementById('btnOpenClosedReopen');
+           const btnClose = document.getElementById('btnCloseClosedReopen');
+           const modal = document.getElementById('closedReopenModal');
+           if(!btnOpen || !modal) return;
+           btnOpen.addEventListener('click', function(){ modal.style.display='block'; });
+           if(btnClose) btnClose.addEventListener('click', function(){ modal.style.display='none'; });
+           modal.addEventListener('click', function(ev){ if(ev.target===modal) modal.style.display='none'; });
+         })();
+       </script></div>`
+    : "";
+  let closeBlock = "";
+  if (open) {
+    const denoms = await getCashDenominations(companyId, true);
+    const denomRows = denoms
+      .map((d) => {
+        const fname = cashRecountQtyFieldName(d.id);
+        return `<tr><td>${escapeHtml(d.name)}</td><td style="text-align:right;white-space:nowrap">${Number(d.value).toFixed(
+          2
+        )}</td><td><input type="number" min="0" step="1" name="${fname}" value="0" style="width:96px" /></td></tr>`;
+      })
+      .join("");
+    const salesTotalRow = await get(
+      "SELECT IFNULL(SUM(total),0) AS t FROM sales WHERE register_id=? AND company_id=?;",
+      [open.id, companyId]
+    );
+    const expenseTotalRow = await get(
+      "SELECT IFNULL(SUM(ABS(amount)),0) AS t FROM cash_movements WHERE register_id=? AND company_id=? AND movement_kind='GASTO';",
+      [open.id, companyId]
+    );
+    const salesTotal = Math.round(Number(salesTotalRow?.t || 0) * 100) / 100;
+    const expenseTotal = Math.round(Number(expenseTotalRow?.t || 0) * 100) / 100;
+    const netTotal = Math.round((salesTotal - expenseTotal) * 100) / 100;
+    const expected = await computeRegisterExpectedCash(open.id, companyId);
+    closeBlock = `<div style="margin-top:16px;padding:14px;border:1px solid #fecaca;border-radius:12px;background:#fff7f7">
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <strong>VENTAS TOTAL: S/ ${salesTotal.toFixed(2)}</strong>
+          <strong>GASTO TOTAL: S/ ${expenseTotal.toFixed(2)}</strong>
+          <strong>TOTAL: S/ ${netTotal.toFixed(2)}</strong>
+          <span class="muted">Efectivo esperado: S/ ${expected.toFixed(2)}</span>
+        </div>
+        <button type="button" id="btnOpenCloseBoxModal" class="danger-button">Cerrar caja</button>
+      </div>
+      <div id="closeBoxModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:240;padding:18px;overflow:auto">
+        <div style="max-width:760px;margin:24px auto;background:#fff;border:1px solid #dbe3ee;border-radius:12px;padding:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">
+            <strong>Reconteo de caja #${open.id}</strong>
+            <button type="button" class="btn-compact" id="btnCloseCloseBoxModal">Cancelar</button>
+          </div>
+          <form method="post" action="/sales/cash-registers/${open.id}/close">
+            <table><thead><tr><th>Nombre</th><th>Valor (S/)</th><th>Cantidad</th></tr></thead><tbody>${
+              denomRows || "<tr><td colspan='3' class='muted'>No hay monedas/billetes activos. Configuralos en Monedas/billetes.</td></tr>"
+            }</tbody></table>
+            <p style="margin-top:14px">Otros medios declarados S/ <input type="number" step="0.01" min="0" name="otherDigital" value="0" style="width:120px" /></p>
+            <button type="submit" class="danger-button" style="margin-top:12px">Confirmar cierre</button>
+          </form>
+        </div>
+      </div>
+      <script>
+        (function(){
+          const btnOpen = document.getElementById('btnOpenCloseBoxModal');
+          const btnClose = document.getElementById('btnCloseCloseBoxModal');
+          const modal = document.getElementById('closeBoxModal');
+          if(!btnOpen || !modal) return;
+          btnOpen.addEventListener('click', function(){ modal.style.display='block'; });
+          if(btnClose) btnClose.addEventListener('click', function(){ modal.style.display='none'; });
+          modal.addEventListener('click', function(ev){ if(ev.target===modal) modal.style.display='none'; });
+        })();
+      </script>
+    </div>`;
+  }
+  const html = renderAppShell({
+    title: "Cajas",
+    subtitle: "Apertura y cierre por usuario",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_cash_registers",
+    body: `${ok}${err}${openForm}${closeBlock}${approverBlock}`,
+  });
+  res.send(renderLayout("Cajas", html));
+});
+
+app.get("/sales/cash-audit", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const from = String(req.query.from || "").trim();
+  const to = String(req.query.to || "").trim();
+  const filterUserId = req.query.userId != null && String(req.query.userId).trim() !== "" ? Number(req.query.userId) : null;
+  const users = await all(
+    "SELECT id, username FROM users WHERE company_id=? AND IFNULL(status,'ACTIVO')='ACTIVO' ORDER BY username;",
+    [companyId]
+  );
+  const userOpts = users
+    .map((u) => {
+      const sel = filterUserId != null && Number.isFinite(filterUserId) && Number(u.id) === filterUserId ? " selected" : "";
+      return `<option value="${u.id}"${sel}>${escapeHtml(u.username)}</option>`;
+    })
+    .join("");
+  let where = "cr.company_id=? AND cr.status='CERRADA'";
+  const params = [companyId];
+  if (filterUserId != null && Number.isFinite(filterUserId) && filterUserId > 0) {
+    where += " AND cr.user_id=?";
+    params.push(filterUserId);
+  }
+  if (from) {
+    where += " AND date(cr.accounting_date) >= date(?)";
+    params.push(from);
+  }
+  if (to) {
+    where += " AND date(cr.accounting_date) <= date(?)";
+    params.push(to);
+  }
+  const rows = await all(
+    `SELECT cr.id, cr.accounting_date, cr.closed_at, cr.close_expected_cash, cr.close_counted_cash,
+      IFNULL(b.name,'-') AS branch_name, u.username AS cashier
+     FROM cash_registers cr
+     JOIN users u ON u.id = cr.user_id
+     LEFT JOIN branches b ON b.id = cr.branch_id
+     WHERE ${where}
+     ORDER BY cr.id DESC LIMIT 400;`,
+    params
+  );
+  const bodyRows = rows
+    .map((r) => {
+      const exp = r.close_expected_cash != null && r.close_expected_cash !== "" ? Number(r.close_expected_cash) : 0;
+      const cnt = r.close_counted_cash != null && r.close_counted_cash !== "" ? Number(r.close_counted_cash) : 0;
+      const dif = Math.round((cnt - exp) * 100) / 100;
+      return `<tr>
+        <td>${escapeHtml(r.branch_name)}</td>
+        <td>${escapeHtml(r.cashier)}</td>
+        <td>${escapeHtml(r.accounting_date)}</td>
+        <td>${escapeHtml(r.closed_at || "-")}</td>
+        <td style="text-align:right;white-space:nowrap">${exp.toFixed(2)}</td>
+        <td style="text-align:right;white-space:nowrap">${cnt.toFixed(2)}</td>
+        <td style="text-align:right;white-space:nowrap">${dif.toFixed(2)}</td>
+        <td><a class="badge" href="/sales/cash-registers/${r.id}/daily-pdf">PDF</a></td>
+      </tr>`;
+    })
+    .join("");
+  const fromVal = escapeHtml(from);
+  const toVal = escapeHtml(to);
+  const html = renderAppShell({
+    title: "Arqueo de cajas",
+    subtitle: "Solo reporte de cajas cerradas",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_cash_registers",
+    body: `<div style="margin-bottom:16px;padding:14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc">
+      <form method="get" action="/sales/cash-audit" class="form-grid" style="align-items:flex-end;margin:0">
+        <div><label class="muted">Usuario</label><select name="userId"><option value="">Todos</option>${userOpts}</select></div>
+        <div><label class="muted">Desde</label><input type="date" name="from" value="${fromVal}" /></div>
+        <div><label class="muted">Hasta</label><input type="date" name="to" value="${toVal}" /></div>
+        <button type="submit">Filtrar</button>
+        <a class="badge" href="/sales/cash-audit">Limpiar</a>
+      </form>
+    </div>
+    <table><thead><tr><th>Sede</th><th>Cajero</th><th>Fecha contable</th><th>Cierre</th><th>Esp. efectivo</th><th>Reconteo</th><th>Dif.</th><th>PDF</th></tr></thead><tbody>${
+      bodyRows || "<tr><td colspan='8' class='muted'>Sin cajas cerradas para el filtro actual.</td></tr>"
+    }</tbody></table>`,
+  });
+  res.send(renderLayout("Arqueo cajas", html));
+});
+
+app.get("/sales/cash-registers/closed", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  if (!(await isApprover(companyId, userId))) return res.status(403).send("Solo aprobadores pueden ver esta lista.");
+  const err = req.query.error ? `<div class="error">${escapeHtml(decodeURIComponent(String(req.query.error).replace(/\+/g, " ")))}</div>` : "";
+  const days = await getCompanyCashReopenDays(companyId);
+  const list = await all(
+    `SELECT cr.*, u.username AS cashier, IFNULL(b.name,'-') AS branch_name
+     FROM cash_registers cr
+     JOIN users u ON u.id = cr.user_id
+     LEFT JOIN branches b ON b.id = cr.branch_id
+     WHERE cr.company_id=? AND cr.status='CERRADA'
+     AND datetime(cr.closed_at) >= datetime('now', '-' || ? || ' days')
+     ORDER BY cr.closed_at DESC;`,
+    [companyId, String(days)]
+  );
+  const bodyRows = list
+    .map((r) => {
+      const exp = r.close_expected_cash != null && r.close_expected_cash !== "" ? Number(r.close_expected_cash) : null;
+      const cnt = r.close_counted_cash != null && r.close_counted_cash !== "" ? Number(r.close_counted_cash) : null;
+      const diff = exp != null && cnt != null ? Math.round((cnt - exp) * 100) / 100 : null;
+      return `<tr>
+        <td>${r.id}</td>
+        <td>${escapeHtml(r.branch_name)}</td>
+        <td>${escapeHtml(r.cashier)}</td>
+        <td>${escapeHtml(r.accounting_date)}</td>
+        <td>${escapeHtml(r.closed_at || "-")}</td>
+        <td style="text-align:right;white-space:nowrap">${exp != null ? exp.toFixed(2) : "—"}</td>
+        <td style="text-align:right;white-space:nowrap">${cnt != null ? cnt.toFixed(2) : "—"}</td>
+        <td style="text-align:right;white-space:nowrap">${diff != null ? diff.toFixed(2) : "—"}</td>
+        <td>
+          <form method="post" action="/sales/cash-registers/${r.id}/reopen" style="display:inline" onsubmit="return confirm('Reabrir esta caja para el cajero?');">
+            <button type="submit" class="btn-compact">Reabrir</button>
+          </form>
+          <a class="badge" href="/sales/cash-registers/${r.id}/daily-pdf">PDF</a>
+        </td>
+      </tr>`;
+    })
+    .join("");
+  const html = renderAppShell({
+    title: "Cajas cerradas",
+    subtitle: `Ultimos ${days} dias`,
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_cash_registers",
+    body: `${err}<p><a href="/sales/cash-registers">&larr; Volver a Cajas</a></p>
+      <table><thead><tr><th>ID</th><th>Sede</th><th>Cajero</th><th>Fecha contable</th><th>Cierre</th><th>Esp. efectivo</th><th>Reconteo</th><th>Dif.</th><th></th></tr></thead><tbody>${
+        bodyRows || "<tr><td colspan='9' class='muted'>Sin cajas cerradas en este periodo.</td></tr>"
+      }</tbody></table>`,
+  });
+  res.send(renderLayout("Cajas cerradas", html));
+});
+
+app.get("/sales/cash-registers/:id/close-form", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  const rid = Number(req.params.id);
+  const reg = await get("SELECT * FROM cash_registers WHERE id=? AND company_id=? AND user_id=?;", [rid, companyId, userId]);
+  if (!reg || reg.status !== "ABIERTA") return res.redirect("/sales/cash-registers?error=Caja+invalida");
+  const salesTotalRow = await get(
+    "SELECT IFNULL(SUM(total),0) AS t FROM sales WHERE register_id=? AND company_id=?;",
+    [rid, companyId]
+  );
+  const expenseTotalRow = await get(
+    "SELECT IFNULL(SUM(ABS(amount)),0) AS t FROM cash_movements WHERE register_id=? AND company_id=? AND movement_kind='GASTO';",
+    [rid, companyId]
+  );
+  const salesTotal = Math.round(Number(salesTotalRow?.t || 0) * 100) / 100;
+  const expenseTotal = Math.round(Number(expenseTotalRow?.t || 0) * 100) / 100;
+  const netTotal = Math.round((salesTotal - expenseTotal) * 100) / 100;
+  const expected = await computeRegisterExpectedCash(rid, companyId);
+  const denoms = await getCashDenominations(companyId, true);
+  const denomRows = denoms
+    .map((d) => {
+      const fname = cashRecountQtyFieldName(d.id);
+      return `<tr><td>${escapeHtml(d.name)}</td><td style="text-align:right;white-space:nowrap">${Number(d.value).toFixed(
+        2
+      )}</td><td><input type="number" min="0" step="1" name="${fname}" value="0" style="width:96px" /></td></tr>`;
+    })
+    .join("");
+  const html = renderAppShell({
+    title: "Cierre de caja",
+    subtitle: `Caja #${rid} — ${escapeHtml(reg.accounting_date)}`,
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_cash_registers",
+    body: `<p><a href="/sales/cash-registers">&larr; Volver</a></p>
+      <div style="margin:0 0 12px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc">
+        <div><strong>VENTAS TOTAL:</strong> S/ ${salesTotal.toFixed(2)}</div>
+        <div><strong>GASTO TOTAL:</strong> S/ ${expenseTotal.toFixed(2)}</div>
+        <div><strong>TOTAL:</strong> S/ ${netTotal.toFixed(2)}</div>
+      </div>
+      <p class="muted">Resumen: efectivo esperado (ventas en efectivo y egresos registrados, sin Izipay): <strong>S/ ${expected.toFixed(2)}</strong></p>
+      <p class="muted">Ingrese la cantidad de billetes y monedas por denominacion (reconteo).</p>
+      <form method="post" action="/sales/cash-registers/${rid}/close">
+        <table><thead><tr><th>Nombre</th><th>Valor (S/)</th><th>Cantidad</th></tr></thead><tbody>${denomRows}</tbody></table>
+        <p style="margin-top:14px">Otros medios declarados (Yape, transferencias, etc.) S/ <input type="number" step="0.01" min="0" name="otherDigital" value="0" style="width:120px" /> <span class="muted">(referencia; no suma al reconteo de efectivo)</span></p>
+        <button type="submit" class="danger-button" style="margin-top:12px">Confirmar cierre</button>
+      </form>`,
+  });
+  res.send(renderLayout("Cierre de caja", html));
+});
+
+app.post("/sales/cash-registers/open", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const prev = await getOpenCashRegister(companyId, userId);
+  if (prev) return res.redirect("/sales/cash-registers?error=Ya+tienes+una+caja+abierta");
+  const d = String(req.body.accountingDate || "").trim();
+  if (!d) return res.redirect("/sales/cash-registers?error=Fecha+contable+requerida");
+  const activeBranches = await all(
+    "SELECT id FROM branches WHERE company_id=? AND status='ACTIVO';",
+    [companyId]
+  );
+  let branchId = null;
+  if (activeBranches.length > 0) {
+    const bid = Number(req.body.branchId);
+    const okBr = await get("SELECT id FROM branches WHERE id=? AND company_id=? AND status='ACTIVO';", [bid, companyId]);
+    if (!okBr) return res.redirect("/sales/cash-registers?error=Seleccione+sede");
+    branchId = bid;
+  }
+  await run("INSERT INTO cash_registers(company_id,user_id,accounting_date,status,branch_id) VALUES (?,?,?,'ABIERTA',?);", [
+    companyId,
+    userId,
+    d,
+    branchId,
+  ]);
+  const reg = await get(
+    "SELECT id FROM cash_registers WHERE company_id=? AND user_id=? AND status='ABIERTA' ORDER BY id DESC LIMIT 1;",
+    [companyId, userId]
+  );
+  await run(
+    "INSERT INTO cash_movements(company_id,register_id,user_id,movement_kind,amount,description) VALUES (?,?,?,?,0,?);",
+    [companyId, reg.id, userId, "APERTURA", `Apertura caja fecha ${d}`]
+  );
+  return res.redirect("/sales/cash-registers?ok=Caja+aperturada");
+});
+
+app.post("/sales/cash-registers/:id/reopen", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  if (!(await isApprover(companyId, userId))) return res.status(403).send("Sin permiso");
+  const rid = Number(req.params.id);
+  const days = await getCompanyCashReopenDays(companyId);
+  const reg = await get(
+    `SELECT * FROM cash_registers WHERE id=? AND company_id=? AND status='CERRADA'
+     AND datetime(closed_at) >= datetime('now', '-' || ? || ' days');`,
+    [rid, companyId, String(days)]
+  );
+  if (!reg) return res.redirect("/sales/cash-registers?error=Caja+no+disponible+para+reapertura");
+  const conflict = await get(
+    "SELECT id FROM cash_registers WHERE company_id=? AND user_id=? AND status='ABIERTA' AND id != ?;",
+    [companyId, reg.user_id, rid]
+  );
+  if (conflict) return res.redirect("/sales/cash-registers?error=El+cajero+tiene+otra+caja+abierta");
+  await run(
+    `UPDATE cash_registers SET status='ABIERTA', closed_at=NULL,
+     close_expected_cash=NULL, close_counted_cash=NULL, close_recount_json=NULL, close_other_digital=NULL
+     WHERE id=? AND company_id=?;`,
+    [rid, companyId]
+  );
+  await run(
+    "INSERT INTO cash_movements(company_id,register_id,user_id,movement_kind,amount,description) VALUES (?,?,?,?,0,?);",
+    [companyId, rid, userId, "REAPERTURA", `Reapertura caja #${rid} (aprobador)`]
+  );
+  return res.redirect("/sales/cash-registers?ok=Caja+reabierta");
+});
+
+app.post("/sales/cash-registers/:id/close", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const rid = Number(req.params.id);
+  const reg = await get("SELECT * FROM cash_registers WHERE id=? AND company_id=? AND user_id=?;", [
+    rid,
+    companyId,
+    userId,
+  ]);
+  if (!reg || reg.status !== "ABIERTA") return res.redirect("/sales/cash-registers?error=Caja+invalida");
+  const expected = await computeRegisterExpectedCash(rid, companyId);
+  const denoms = await getCashDenominations(companyId, true);
+  let counted = 0;
+  const breakdown = [];
+  for (const d of denoms) {
+    const fname = cashRecountQtyFieldName(d.id);
+    const q = Math.max(0, Math.floor(Number(req.body[fname] ?? 0)));
+    if (q > 0) {
+      const sub = Math.round(q * Number(d.value) * 100) / 100;
+      counted += sub;
+      breakdown.push({ label: d.name, value: Number(d.value), qty: q, subtotal: sub });
+    }
+  }
+  counted = Math.round(counted * 100) / 100;
+  const otherDigital = Math.max(0, Math.round(Number(req.body.otherDigital || 0) * 100) / 100);
+  const diff = Math.round((counted - expected) * 100) / 100;
+  await run(
+    `UPDATE cash_registers SET status='CERRADA', closed_at=CURRENT_TIMESTAMP,
+     close_expected_cash=?, close_counted_cash=?, close_recount_json=?, close_other_digital=?
+     WHERE id=?;`,
+    [expected, counted, JSON.stringify(breakdown), otherDigital, rid]
+  );
+  const sum = await get(
+    `SELECT IFNULL(SUM(total),0) AS t, COUNT(*) AS n FROM sales WHERE register_id=? AND company_id=?;`,
+    [rid, companyId]
+  );
+  await run(
+    "INSERT INTO cash_movements(company_id,register_id,user_id,movement_kind,amount,description) VALUES (?,?,?,?,?,?);",
+    [
+      companyId,
+      rid,
+      userId,
+      "CIERRE",
+      Number(sum?.t || 0),
+      `Cierre: ${Number(sum?.n || 0)} ventas total S/ ${Number(sum?.t || 0).toFixed(2)} | Esp. efectivo S/ ${expected.toFixed(
+        2
+      )} | Reconteo S/ ${counted.toFixed(2)} | Dif. S/ ${diff.toFixed(2)} | Otros decl. S/ ${otherDigital.toFixed(2)}`,
+    ]
+  );
+  return res.redirect("/sales/cash-registers?ok=Caja+cerrada");
+});
+
+app.get("/sales/cash-registers/:id/daily-pdf", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const rid = Number(req.params.id);
+  const reg = await get("SELECT * FROM cash_registers WHERE id=? AND company_id=?;", [rid, companyId]);
+  if (!reg) return res.status(404).send("Caja no encontrada");
+  const approver = await isApprover(companyId, userId);
+  const own = Number(reg.user_id) === Number(userId);
+  if (!own && !approver) return res.status(403).send("Sin permisos para ver esta caja");
+  if (own && reg.status === "CERRADA" && !approver) {
+    return res.status(403).send("Solo los aprobadores pueden abrir el PDF de cajas cerradas.");
+  }
+  const salesList = await all(
+    `SELECT s.voucher_code, s.total, s.created_at, pt.name AS pago
+     FROM sales s JOIN payment_types pt ON pt.id=s.payment_type_id
+     WHERE s.register_id=? AND s.company_id=? ORDER BY s.id;`,
+    [rid, companyId]
+  );
+  const lines = [
+    `Caja #${reg.id} — Fecha contable: ${reg.accounting_date}`,
+    `Estado: ${reg.status} | Apertura: ${reg.opened_at} | Cierre: ${reg.closed_at || "-"}`,
+    "",
+    "Ventas:",
+    ...salesList.map((s) => `${s.voucher_code}  ${s.pago}  S/ ${Number(s.total).toFixed(2)}  (${s.created_at})`),
+  ];
+  if (reg.status === "CERRADA" && reg.close_expected_cash != null && reg.close_counted_cash != null) {
+    const od = reg.close_other_digital != null ? Number(reg.close_other_digital) : 0;
+    const df = Math.round((Number(reg.close_counted_cash) - Number(reg.close_expected_cash)) * 100) / 100;
+    lines.push(
+      "",
+      "Cierre — efectivo:",
+      `  Esperado (sistema): S/ ${Number(reg.close_expected_cash).toFixed(2)}`,
+      `  Reconteo (efectivo): S/ ${Number(reg.close_counted_cash).toFixed(2)}`,
+      `  Diferencia: S/ ${df.toFixed(2)}`,
+      `  Otros medios declarados: S/ ${od.toFixed(2)}`
+    );
+  }
+  return sendSimplePdf(res, `caja-${reg.id}-${reg.accounting_date}.pdf`, `Resumen caja ${reg.id}`, lines);
+});
+
+app.get("/sales/pos/product-search", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.status(403).json({ ok: false, items: [] });
+  const q = String(req.query.q || "").trim();
+  if (!q) return res.json({ ok: true, items: [] });
+  const items = await loadPosProductCatalog(companyId, { searchQuery: q, limit: 80 });
+  return res.json({ ok: true, items });
+});
+
+app.get("/sales/pos/product-serials", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.status(403).json({ ok: false, items: [] });
+  const productId = Number(req.query.productId || 0);
+  const q = String(req.query.q || "").trim();
+  if (!Number.isFinite(productId) || productId < 1) return res.json({ ok: false, items: [] });
+  const params = [companyId, productId];
+  let whereExtra = "";
+  if (q) {
+    whereExtra = " AND LOWER(ps.serial_number) LIKE ? ";
+    params.push(`%${q.toLowerCase().replace(/%/g, "").replace(/_/g, "")}%`);
+  }
+  const rows = await all(
+    `SELECT ps.id, ps.serial_number
+     FROM product_serials ps
+     JOIN products p ON p.id=ps.product_id AND p.company_id=ps.company_id
+     WHERE ps.company_id=? AND ps.product_id=? AND ps.status='EN_STOCK' AND p.requires_serial=1 AND p.status='ACTIVO'
+     ${whereExtra}
+     ORDER BY ps.serial_number
+     LIMIT 250;`,
+    params
+  );
+  return res.json({ ok: true, items: rows.map((r) => ({ id: Number(r.id), serial: String(r.serial_number || "") })) });
+});
+
+app.post("/sales/pos/serial-validate", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.status(400).json({ ok: false, message: "Sin caja abierta" });
+  const productId = Number(req.body.productId);
+  const serial = String(req.body.serial || "").trim();
+  if (!Number.isFinite(productId) || productId < 1 || !serial) {
+    return res.json({ ok: false, message: "Producto y serie son obligatorios" });
+  }
+  const row = await get(
+    `SELECT ps.id, ps.serial_number
+     FROM product_serials ps
+     JOIN products p ON p.id = ps.product_id AND p.company_id = ps.company_id
+     WHERE ps.company_id = ? AND ps.product_id = ? AND UPPER(TRIM(ps.serial_number)) = UPPER(TRIM(?))
+       AND ps.status = 'EN_STOCK' AND p.requires_serial = 1 AND p.status = 'ACTIVO'
+     LIMIT 1;`,
+    [companyId, productId, serial]
+  );
+  if (!row) return res.json({ ok: false, message: "Serie no encontrada o sin stock disponible" });
+  return res.json({ ok: true, serialId: row.id, serialNumber: row.serial_number });
+});
+
+app.get("/sales/pos", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  await ensureSalesDefaults(companyId);
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.redirect("/sales/cash-registers?error=Debes+aperturar+caja+antes+de+vender");
+  const payTypes = await all(
+    "SELECT id, name, code, active, is_izipay FROM payment_types WHERE company_id=? AND active=1 ORDER BY sort_order, id;",
+    [companyId]
+  );
+  const productsPayload = await loadPosProductCatalog(companyId, { limit: 1500 });
+  const productsJson = JSON.stringify(productsPayload).replace(/</g, "\\u003c");
+  const payOpts = payTypes.map((p) => `<option value="${p.id}" data-izipay="${p.is_izipay ? 1 : 0}">${escapeHtml(p.name)}</option>`).join("");
+  const flashErr = req.query.error ? escapeHtml(decodeURIComponent(String(req.query.error).replace(/\+/g, " "))) : "";
+  const flashOk = req.query.ok ? escapeHtml(decodeURIComponent(String(req.query.ok).replace(/\+/g, " "))) : "";
+  const flashBlock = [
+    flashErr ? `<div class="pos-msg err" role="alert">${flashErr}</div>` : "",
+    flashOk ? `<div class="pos-msg ok" role="status">${flashOk}</div>` : "",
+  ].join("");
+  const html = renderAppShell({
+    title: "Post venta (POS)",
+    subtitle: `Caja #${reg.id} — ${escapeHtml(reg.accounting_date)}`,
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_pos",
+    body: `<div class="pos-page">
+      ${flashBlock}
+      <div class="pos-layout">
+        <div class="pos-main">
+          <div class="pos-breadcrumbs">Ventas / POS</div>
+          <h1 class="pos-title">Punto de venta</h1>
+          <div class="pos-search-wrap">
+            <label for="posSearch">Productos</label>
+            <p class="muted" style="font-size:12px;margin:0 0 8px;line-height:1.35">Escriba para buscar en todos los productos activos (Logistica). Los que no tienen precio o stock aparecen para ubicarlos; solo los marcados como listos se pueden agregar al carrito.</p>
+            <input type="search" id="posSearch" placeholder="Ej: SMA, modelo, marca o escanee codigo" autocomplete="off" />
+            <div id="posSuggest" class="pos-suggest" role="listbox"></div>
+          </div>
+          <div class="pos-table-wrap">
+            <table class="pos-table"><thead><tr><th class="pos-col-product">Producto</th><th class="pos-num">P. unit.</th><th class="pos-num">Cant.</th><th class="pos-col-serie">Serie</th><th class="pos-num">Total</th><th class="pos-th-clear" scope="col"><button type="button" class="pos-btn pos-btn-danger" id="posClearCart" title="Vaciar todo el carrito" aria-label="Vaciar todo el carrito">Vaciar todo</button></th></tr></thead><tbody id="posCartBody"><tr id="posCartEmpty"><td colspan="6" class="muted">Carrito vacio — busque un producto arriba.</td></tr></tbody></table>
+          </div>
+          <div class="pos-serial-modal" id="posSerialModal" style="display:none">
+            <div class="pos-serial-card">
+              <div class="pos-serial-head">
+                <strong id="posSerialTitle">Seleccionar series</strong>
+                <button type="button" class="pos-btn pos-btn-ghost" id="posSerialClose">Cerrar</button>
+              </div>
+              <input type="search" id="posSerialSearch" placeholder="Buscar serie..." />
+              <div class="muted" id="posSerialCounter" style="margin-top:6px"></div>
+              <div id="posSerialList" class="pos-serial-list"></div>
+            </div>
+          </div>
+        </div>
+        <aside class="pos-aside">
+          <div class="pos-aside-head">Resumen de cobro</div>
+          <form method="post" action="/sales/pos/checkout" id="posForm">
+            <input type="hidden" name="posCart" id="posCartField" value="[]" />
+            <div>
+              <label for="paySel">Tipo de pago</label>
+              <select name="paymentTypeId" id="paySel" required>${payOpts}</select>
+            </div>
+            <div>
+              <label for="amtTen">Efectivo recibido</label>
+              <input type="number" step="0.01" min="0" name="amountTendered" id="amtTen" placeholder="Monto recibido" />
+            </div>
+            <div class="pos-summary">
+              <div>Monto efectivo: <strong id="posSubPay">S/ 0.00</strong></div>
+              <div>Vuelto: <strong id="posChange" class="pos-change">S/ 0.00</strong></div>
+            </div>
+            <div class="pos-checkout-total">
+              <span>Total venta</span>
+              <strong id="posTotalAside">S/ 0.00</strong>
+            </div>
+            <button type="submit" id="posSubmitSale">Registrar venta</button>
+          </form>
+          <details class="pos-help"><summary>Ayuda Izipay</summary>
+            <p style="margin:8px 0 0">Documentacion: <a href="https://developers.izipay.pe/web-core/quickstart/" target="_blank" rel="noopener">developers.izipay.pe</a>. Token de sesion en backend; variables opcionales IZIPAY_SESSION_TOKEN e IZIPAY_RSA_PUBLIC_KEY para pruebas.</p>
+          </details>
+        </aside>
+      </div>
+    </div>
+    <script>
+      (function(){
+        var PRODUCTS = ${productsJson};
+        var cart = [];
+        var suggestIdx = -1;
+        var searchTimer = null;
+        var searchSeq = 0;
+        var serialModalLineIdx = -1;
+        var serialPool = [];
+
+        function money(n){ return "S/ " + (Math.round(n * 100) / 100).toFixed(2); }
+        function productById(id){
+          var nid = Number(id);
+          for (var i=0;i<PRODUCTS.length;i++){ if(Number(PRODUCTS[i].id)===nid) return PRODUCTS[i]; }
+          return null;
+        }
+        function ensureProductInCache(p){
+          var nid = Number(p.id);
+          for (var i=0;i<PRODUCTS.length;i++){ if(Number(PRODUCTS[i].id)===nid){ PRODUCTS[i]=p; return; } }
+          PRODUCTS.push(p);
+        }
+        function getLineSerialized(line){ return Array.isArray(line.serials) ? line.serials : []; }
+        function cartTotal(){ var t=0; cart.forEach(function(l){ t += (Number(l.qty)||0) * (Number(l.unitPrice)||0); }); return t; }
+        function qtyInCartForProduct(pid){
+          var n=0;
+          cart.forEach(function(l){ if(Number(l.productId)===Number(pid) && !l.requiresSerial) n += Number(l.qty)||0; });
+          return n;
+        }
+        function refreshTotals(){
+          var t = cartTotal();
+          var elA = document.getElementById("posTotalAside"); if(elA) elA.textContent = money(t);
+          var ten = parseFloat(document.getElementById("amtTen").value);
+          var ch = document.getElementById("posChange");
+          var sub = document.getElementById("posSubPay");
+          if(sub) sub.textContent = money(t);
+          if(!isNaN(ten) && ten >= t && t > 0){ if(ch) ch.textContent = money(ten - t); }
+          else { if(ch) ch.textContent = t > 0 ? "Indique monto" : money(0); }
+        }
+        function syncField(){
+          var f = document.getElementById("posCartField");
+          if(!f) return;
+          var payload = cart.map(function(l){
+            return {
+              productId: l.productId,
+              qty: l.qty,
+              serialIds: l.requiresSerial ? getLineSerialized(l).map(function(s){ return s.id; }) : [],
+            };
+          });
+          f.value = JSON.stringify(payload);
+        }
+        function renderSeriesCell(td, line, idx){
+          if(!line.requiresSerial){
+            td.textContent = "—";
+            return;
+          }
+          var selectedSerials = getLineSerialized(line);
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "pos-btn pos-btn-ghost";
+          btn.textContent = "Series (" + selectedSerials.length + "/" + line.qty + ")";
+          btn.onclick = function(){ openSerialModal(idx); };
+          td.appendChild(btn);
+          if(selectedSerials.length){
+            var wrap = document.createElement("div");
+            wrap.style.marginTop = "4px";
+            selectedSerials.forEach(function(s){
+              var chip = document.createElement("span");
+              chip.className = "pos-series-chip";
+              chip.textContent = String(s.serial || "");
+              wrap.appendChild(chip);
+            });
+            td.appendChild(wrap);
+          }
+        }
+        function renderCart(){
+          var tb = document.getElementById("posCartBody");
+          if(!tb) return;
+          while(tb.firstChild) tb.removeChild(tb.firstChild);
+          if(cart.length===0){
+            var tr0 = document.createElement("tr");
+            var td0 = document.createElement("td");
+            td0.colSpan = 6;
+            td0.className = "muted";
+            td0.textContent = "Carrito vacio - busque un producto arriba.";
+            tr0.appendChild(td0);
+            tb.appendChild(tr0);
+            refreshTotals();
+            syncField();
+            return;
+          }
+          cart.forEach(function(line, idx){
+            var tr = document.createElement("tr");
+            var tdP = document.createElement("td");
+            tdP.className = "pos-col-product";
+            var strong = document.createElement("strong");
+            strong.textContent = line.name || "";
+            var sub = document.createElement("div");
+            sub.className = "muted";
+            sub.textContent = line.sku || "";
+            tdP.appendChild(strong);
+            tdP.appendChild(sub);
+            var tdPu = document.createElement("td");
+            tdPu.className = "pos-num";
+            tdPu.textContent = money(line.unitPrice);
+            var tdQ = document.createElement("td");
+            tdQ.className = "pos-num";
+            var qIn = document.createElement("input");
+            qIn.type = "number";
+            qIn.min = "1";
+            qIn.className = "pos-qty-input";
+            qIn.value = String(line.qty || 1);
+            qIn.onchange = function(){
+              var q = parseInt(qIn.value, 10);
+              if(!Number.isFinite(q) || q < 1) q = 1;
+              if(!line.requiresSerial){
+                var p = productById(line.productId);
+                if(p && q > Number(p.stock || 0)){ alert("Stock insuficiente."); q = Number(line.qty || 1); }
+              }
+              line.qty = q;
+              if(line.requiresSerial){
+                var ser = getLineSerialized(line);
+                if(ser.length > q) line.serials = ser.slice(0, q);
+              }
+              renderCart();
+            };
+            tdQ.appendChild(qIn);
+            var tdS = document.createElement("td");
+            tdS.className = "pos-col-serie";
+            renderSeriesCell(tdS, line, idx);
+            var tdT = document.createElement("td");
+            tdT.className = "pos-num";
+            tdT.textContent = money((line.qty || 0) * (line.unitPrice || 0));
+            var tdX = document.createElement("td");
+            tdX.className = "pos-cell-actions";
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "pos-btn pos-btn-ghost pos-btn-row-action";
+            btn.textContent = "Quitar";
+            btn.onclick = function(){ cart.splice(idx, 1); renderCart(); };
+            tdX.appendChild(btn);
+            tr.appendChild(tdP);
+            tr.appendChild(tdPu);
+            tr.appendChild(tdQ);
+            tr.appendChild(tdS);
+            tr.appendChild(tdT);
+            tr.appendChild(tdX);
+            tb.appendChild(tr);
+          });
+          refreshTotals();
+          syncField();
+        }
+        function renderSuggest(list, opts){
+          opts = opts || {};
+          var box = document.getElementById("posSuggest");
+          if(!box) return;
+          box.innerHTML = "";
+          suggestIdx = -1;
+          if(opts.loading){
+            box.innerHTML = "<div class=pos-suggest-loading>Buscando productos...</div>";
+            box.classList.add("open");
+            return;
+          }
+          if(!list.length){ box.classList.remove("open"); return; }
+          box.classList.add("open");
+          list.forEach(function(p, idx){
+            var div = document.createElement("div");
+            div.className = "pos-suggest-item";
+            div.setAttribute("role","option");
+            var wrap = document.createElement("div");
+            var title = document.createElement("strong");
+            title.textContent = p.name || "";
+            var meta = document.createElement("div");
+            meta.className = "pos-suggest-meta";
+            var line = [p.sku, p.barcode, "Stock " + (p.stock != null ? p.stock : 0), money(p.sale_price)].filter(function(x){ return x != null && String(x).length > 0; }).join(" · ");
+            if(p.requires_serial) line += " · Serie";
+            meta.textContent = line;
+            wrap.appendChild(title);
+            wrap.appendChild(meta);
+            if(p.sellable === false){
+              var w = document.createElement("div");
+              w.className = "pos-suggest-warn";
+              w.textContent = "Sin precio o sin stock — revise en Logistica";
+              wrap.appendChild(w);
+            }
+            div.appendChild(wrap);
+            div.onclick = function(){ addProductFromSearch(p); };
+            box.appendChild(div);
+          });
+        }
+        function runProductSearch(q){
+          var seq = ++searchSeq;
+          if(!q){ renderSuggest([]); return; }
+          renderSuggest([], { loading: true });
+          fetch("/sales/pos/product-search?q="+encodeURIComponent(q))
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              if(seq !== searchSeq) return;
+              if(!data || !data.ok || !data.items) renderSuggest([]);
+              else renderSuggest(data.items);
+            })
+            .catch(function(){
+              if(seq !== searchSeq) return;
+              renderSuggest([]);
+            });
+        }
+        function localFilterProducts(q){
+          q = String(q||"").trim().toLowerCase();
+          if(!q) return [];
+          var out = [];
+          for(var i=0;i<PRODUCTS.length;i++){
+            var p = PRODUCTS[i];
+            var blob = (String(p.name||"")+" "+String(p.sku||"")+" "+String(p.barcode||"")).toLowerCase();
+            if(blob.indexOf(q)>=0) out.push(p);
+            if(out.length>=35) break;
+          }
+          return out;
+        }
+        function addProductFromSearch(p){
+          ensureProductInCache(p);
+          if(p.sellable === false){
+            alert("Este producto no tiene precio de venta o stock. Configúrelo en Logistica (productos y precios de venta).");
+            return;
+          }
+          var q = 1;
+          if(!p.requires_serial && qtyInCartForProduct(p.id) + q > p.stock){
+            alert("Stock insuficiente para esta cantidad.");
+            return;
+          }
+          addOrUpdateLine(p, q);
+          document.getElementById("posSuggest").classList.remove("open");
+          document.getElementById("posSearch").value = "";
+          renderCart();
+        }
+        document.getElementById("posSearch").addEventListener("input", function(){
+          var raw = String(this.value||"").trim();
+          clearTimeout(searchTimer);
+          if(!raw){ renderSuggest([]); return; }
+          var local = localFilterProducts(raw);
+          if(local.length) renderSuggest(local);
+          else renderSuggest([], { loading: true });
+          searchTimer = setTimeout(function(){ runProductSearch(raw); }, 180);
+        });
+        function addOrUpdateLine(product, qty){
+          var existing = null;
+          for (var i=0;i<cart.length;i++){
+            if(Number(cart[i].productId)===Number(product.id) && !!cart[i].requiresSerial === !!product.requires_serial){
+              existing = cart[i];
+              break;
+            }
+          }
+          if(existing){
+            existing.qty = Number(existing.qty || 0) + qty;
+          } else {
+            cart.push({
+              productId: product.id,
+              name: product.name,
+              sku: product.sku,
+              unitPrice: product.sale_price,
+              qty: qty,
+              requiresSerial: !!product.requires_serial,
+              serials: [],
+            });
+          }
+        }
+        function refreshSerialCounter(){
+          var line = cart[serialModalLineIdx];
+          var cnt = document.getElementById("posSerialCounter");
+          if(!line || !cnt) return;
+          cnt.textContent = "Seleccionadas: " + getLineSerialized(line).length + " / " + line.qty;
+        }
+        function renderSerialModalList(){
+          var line = cart[serialModalLineIdx];
+          var listEl = document.getElementById("posSerialList");
+          if(!line || !listEl) return;
+          while(listEl.firstChild) listEl.removeChild(listEl.firstChild);
+          var selectedMap = {};
+          getLineSerialized(line).forEach(function(s){ selectedMap[String(s.id)] = true; });
+          var maxSel = Number(line.qty || 0);
+          var curSel = Object.keys(selectedMap).length;
+          serialPool.forEach(function(item){
+            var row = document.createElement("div");
+            row.className = "pos-serial-item";
+            var ckCell = document.createElement("span");
+            ckCell.className = "pos-serial-cb";
+            var ck = document.createElement("input");
+            ck.type = "checkbox";
+            ck.checked = !!selectedMap[String(item.id)];
+            if(!ck.checked && curSel >= maxSel) ck.disabled = true;
+            ck.onchange = function(){
+              var arr = getLineSerialized(line).slice();
+              if(ck.checked){
+                if(arr.length >= maxSel){ ck.checked = false; return; }
+                arr.push({ id: item.id, serial: item.serial });
+              } else {
+                arr = arr.filter(function(s){ return Number(s.id) !== Number(item.id); });
+              }
+              line.serials = arr;
+              refreshSerialCounter();
+              renderSerialModalList();
+              syncField();
+              renderCart();
+            };
+            ckCell.appendChild(ck);
+            var tx = document.createElement("span");
+            tx.className = "pos-serial-label";
+            tx.textContent = item.serial;
+            row.appendChild(ckCell);
+            row.appendChild(tx);
+            listEl.appendChild(row);
+          });
+          refreshSerialCounter();
+        }
+        function loadSerials(productId, q){
+          var url = "/sales/pos/product-serials?productId=" + encodeURIComponent(productId) + "&q=" + encodeURIComponent(q || "");
+          fetch(url)
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              serialPool = (data && data.ok && Array.isArray(data.items)) ? data.items : [];
+              renderSerialModalList();
+            })
+            .catch(function(){ serialPool = []; renderSerialModalList(); });
+        }
+        function openSerialModal(idx){
+          var line = cart[idx];
+          if(!line || !line.requiresSerial) return;
+          serialModalLineIdx = idx;
+          document.getElementById("posSerialTitle").textContent = "Series - " + (line.name || "");
+          document.getElementById("posSerialModal").style.display = "flex";
+          document.getElementById("posSerialSearch").value = "";
+          loadSerials(line.productId, "");
+        }
+        function closeSerialModal(){
+          serialModalLineIdx = -1;
+          serialPool = [];
+          document.getElementById("posSerialModal").style.display = "none";
+        }
+        document.getElementById("posSerialClose").onclick = closeSerialModal;
+        document.getElementById("posSerialModal").addEventListener("click", function(ev){
+          if(ev.target && ev.target.id === "posSerialModal") closeSerialModal();
+        });
+        document.getElementById("posSerialSearch").addEventListener("input", function(){
+          var line = cart[serialModalLineIdx];
+          if(!line) return;
+          loadSerials(line.productId, this.value || "");
+        });
+        document.getElementById("posClearCart").onclick = function(){ if(cart.length && !confirm("Vaciar carrito?")) return; cart = []; renderCart(); };
+        document.getElementById("amtTen").addEventListener("input", refreshTotals);
+        document.getElementById("paySel").addEventListener("change", function(){
+          var opt = this.options[this.selectedIndex];
+          var iz = opt && opt.dataset.izipay === "1";
+          document.getElementById("amtTen").placeholder = iz ? "Igual al total (Izipay)" : "Monto recibido (efectivo)";
+          refreshTotals();
+        });
+        document.getElementById("posForm").addEventListener("submit", function(ev){
+          syncField();
+          if(cart.length===0){ ev.preventDefault(); alert("Agregue productos al carrito"); return; }
+          for (var i=0;i<cart.length;i++){
+            if(cart[i].requiresSerial && getLineSerialized(cart[i]).length !== Number(cart[i].qty || 0)){
+              ev.preventDefault();
+              alert("Complete las series del producto: " + cart[i].name);
+              return;
+            }
+          }
+          var t = cartTotal();
+          var pay = document.getElementById("paySel");
+          var opt = pay.options[pay.selectedIndex];
+          var iz = opt && opt.dataset.izipay === "1";
+          var ten = parseFloat(document.getElementById("amtTen").value);
+          if(iz){
+            if(ten > 0 && Math.abs(ten - t) > 0.01){ ev.preventDefault(); alert("Izipay: el monto debe coincidir con el total"); return; }
+            if(isNaN(ten) || ten <= 0) document.getElementById("amtTen").value = String(t.toFixed(2));
+          } else {
+            if(isNaN(ten) || ten < t){ ev.preventDefault(); alert("Monto recibido insuficiente"); return; }
+          }
+        });
+        document.addEventListener("click", function(e){
+          var t = e.target;
+          if(!t) return;
+          var inSearch = false;
+          var inSug = false;
+          var el = t;
+          while(el){
+            if(el.id==="posSearch") inSearch = true;
+            if(el.id==="posSuggest") inSug = true;
+            el = el.parentElement;
+          }
+          if(!inSearch && !inSug) document.getElementById("posSuggest").classList.remove("open");
+        });
+        renderCart();
+      })();
+    </script>`,
+  });
+  res.send(renderLayout("POS", html));
+});
+
+app.post("/sales/pos/checkout", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.redirect("/sales/cash-registers?error=Sin+caja+abierta");
+  const paymentTypeId = Number(req.body.paymentTypeId);
+  const pt = await get("SELECT * FROM payment_types WHERE id=? AND company_id=? AND active=1;", [paymentTypeId, companyId]);
+  if (!pt) return res.redirect("/sales/pos?error=Tipo+de+pago+invalido");
+  const amountTendered = Number(req.body.amountTendered || 0);
+  let cart = [];
+  try {
+    cart = JSON.parse(String(req.body.posCart || "[]"));
+  } catch {
+    return res.redirect("/sales/pos?error=Carrito+invalido");
+  }
+  if (!Array.isArray(cart) || cart.length === 0) return res.redirect("/sales/pos?error=Carrito+vacio");
+  const normalized = [];
+  const serialIdsSeen = new Set();
+  for (const raw of cart) {
+    const productId = Number(raw.productId);
+    const qty = Math.floor(Number(raw.qty));
+    const serialIdsRaw = Array.isArray(raw.serialIds)
+      ? raw.serialIds
+      : raw.serialId != null && raw.serialId !== ""
+        ? [raw.serialId]
+        : [];
+    const serialIds = serialIdsRaw
+      .map((v) => Number(v))
+      .filter((v) => Number.isFinite(v) && v > 0);
+    if (!Number.isFinite(productId) || productId < 1) continue;
+    if (!Number.isFinite(qty) || qty < 1) continue;
+    normalized.push({ productId, qty, serialIds });
+  }
+  if (normalized.length === 0) return res.redirect("/sales/pos?error=Lineas+invalidas");
+  for (const ln of normalized) {
+    for (const sid of ln.serialIds) {
+      if (serialIdsSeen.has(sid)) return res.redirect("/sales/pos?error=Serie+duplicada+en+el+carrito");
+      serialIdsSeen.add(sid);
+    }
+  }
+  const qtyByProduct = new Map();
+  for (const ln of normalized) {
+    if (!ln.serialIds.length) {
+      qtyByProduct.set(ln.productId, (qtyByProduct.get(ln.productId) || 0) + ln.qty);
+    }
+  }
+  const lines = [];
+  for (const ln of normalized) {
+    const pr = await get(
+      `SELECT p.id, p.current_stock, p.requires_serial,
+        (SELECT pp.price FROM product_prices pp WHERE pp.product_id=p.id AND pp.company_id=p.company_id ORDER BY datetime(pp.effective_date) DESC LIMIT 1) AS price
+       FROM products p WHERE p.id=? AND p.company_id=? AND p.status='ACTIVO';`,
+      [ln.productId, companyId]
+    );
+    if (!pr) return res.redirect("/sales/pos?error=Producto+no+disponible");
+    const price = Number(pr.price || 0);
+    if (price <= 0) return res.redirect("/sales/pos?error=Precio+no+definido");
+    const reqSer = Number(pr.requires_serial) === 1;
+    if (reqSer) {
+      if (!ln.serialIds.length || ln.serialIds.length !== ln.qty) {
+        return res.redirect("/sales/pos?error=Producto+con+serie+requiere+series+segun+cantidad");
+      }
+      for (const sid of ln.serialIds) {
+        const ser = await get(
+          `SELECT ps.id FROM product_serials ps
+           WHERE ps.company_id=? AND ps.id=? AND ps.product_id=? AND ps.status='EN_STOCK';`,
+          [companyId, sid, ln.productId]
+        );
+        if (!ser) return res.redirect("/sales/pos?error=Serie+no+disponible");
+      }
+      for (const sid of ln.serialIds) {
+        lines.push({
+          productId: ln.productId,
+          quantity: 1,
+          unitPrice: price,
+          total: price,
+          serialId: sid,
+          requiresSerial: true,
+        });
+      }
+    } else {
+      if (ln.serialIds.length) return res.redirect("/sales/pos?error=Linea+invalida");
+      const need = qtyByProduct.get(ln.productId) || 0;
+      if (need > Number(pr.current_stock)) {
+        return res.redirect("/sales/pos?error=Stock+insuficiente");
+      }
+      lines.push({
+        productId: ln.productId,
+        quantity: ln.qty,
+        unitPrice: price,
+        total: ln.qty * price,
+        serialId: null,
+        requiresSerial: false,
+      });
+    }
+  }
+  for (const [pid, need] of qtyByProduct.entries()) {
+    const pr = await get("SELECT current_stock FROM products WHERE id=? AND company_id=?;", [pid, companyId]);
+    if (!pr || need > Number(pr.current_stock)) {
+      return res.redirect("/sales/pos?error=Stock+insuficiente");
+    }
+  }
+  const total = lines.reduce((a, b) => a + b.total, 0);
+  let change = 0;
+  if (Number(pt.is_izipay) === 1) {
+    if (amountTendered > 0 && Math.abs(amountTendered - total) > 0.01) {
+      return res.redirect("/sales/pos?error=Izipay:+monto+debe+coincidir+con+total");
+    }
+    change = 0;
+  } else {
+    if (amountTendered < total) return res.redirect("/sales/pos?error=Monto+recibido+insuficiente");
+    change = Math.round((amountTendered - total) * 100) / 100;
+  }
+  const voucher = await nextSaleVoucherCode(companyId);
+  await run(
+    `INSERT INTO sales(company_id,register_id,user_id,voucher_code,payment_type_id,total,amount_tendered,change_amount,status)
+     VALUES (?,?,?,?,?,?,?,?, 'COMPLETADA');`,
+    [companyId, reg.id, userId, voucher, paymentTypeId, total, amountTendered, change]
+  );
+  const sale = await get("SELECT id FROM sales WHERE company_id=? AND voucher_code=?;", [companyId, voucher]);
+  for (const ln of lines) {
+    await run(
+      "INSERT INTO sale_items(sale_id,product_id,quantity,unit_price,total,product_serial_id) VALUES (?,?,?,?,?,?);",
+      [sale.id, ln.productId, ln.quantity, ln.unitPrice, ln.total, ln.serialId || null]
+    );
+    await run("UPDATE products SET current_stock=current_stock-? WHERE id=? AND company_id=?;", [
+      ln.quantity,
+      ln.productId,
+      companyId,
+    ]);
+    if (ln.serialId) {
+      await run("UPDATE product_serials SET status='VENDIDO' WHERE id=? AND company_id=? AND status='EN_STOCK';", [
+        ln.serialId,
+        companyId,
+      ]);
+      const okSer = await get("SELECT id FROM product_serials WHERE id=? AND status='VENDIDO';", [ln.serialId]);
+      if (!okSer) {
+        return res.redirect("/sales/pos?error=Serie+ya+no+disponible+reintente");
+      }
+    }
+    await run(
+      "INSERT INTO stock_movements(company_id,product_id,movement_type,quantity,note) VALUES (?,?,?,?,?);",
+      [companyId, ln.productId, "SALIDA", ln.quantity, `Venta ${voucher}`]
+    );
+  }
+  await run(
+    "INSERT INTO cash_movements(company_id,register_id,user_id,movement_kind,amount,description,sale_id) VALUES (?,?,?,?,?,?,?);",
+    [companyId, reg.id, userId, "VENTA", total, voucher, sale.id]
+  );
+  return res.redirect(`/sales/pos?ok=Venta+registrada:+${encodeURIComponent(voucher)}`);
+});
+
+app.get("/sales/pos/sale/:id/pdf", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId, companyName, companyRuc } = req.session.user;
+  const saleId = Number(req.params.id);
+  const sale = await get(
+    `SELECT s.*, pt.name AS payment_name FROM sales s JOIN payment_types pt ON pt.id=s.payment_type_id WHERE s.id=? AND s.company_id=?;`,
+    [saleId, companyId]
+  );
+  if (!sale) return res.status(404).send("Venta no encontrada");
+  const items = await all(
+    `SELECT p.name, si.quantity, si.unit_price, si.total,
+      IFNULL(b.name,'-') AS brand_name, IFNULL(c.name,'-') AS cat_name, IFNULL(TRIM(p.model),'') AS model_txt,
+      IFNULL(TRIM(ps.serial_number),'') AS serial_number
+     FROM sale_items si JOIN products p ON p.id=si.product_id
+     LEFT JOIN brands b ON b.id=p.brand_id AND b.company_id=p.company_id
+     LEFT JOIN categories c ON c.id=p.category_id AND c.company_id=p.company_id
+     LEFT JOIN product_serials ps ON ps.id = si.product_serial_id
+     WHERE si.sale_id=?;`,
+    [saleId]
+  );
+  return sendVoucherPdf(res, `${sale.voucher_code}.pdf`, {
+    title: "Voucher de venta",
+    code: sale.voucher_code,
+    date: sale.created_at,
+    status: "COMPLETADA",
+    companyName: companyName || "Empresa",
+    companyRuc: companyRuc || "",
+    companyInfo: "Post Venta — comprobante de venta",
+    metaLines: [
+      `Pago: ${sale.payment_name}`,
+      `Total: S/ ${Number(sale.total).toFixed(2)}`,
+      `Recibido: S/ ${Number(sale.amount_tendered).toFixed(2)}`,
+      `Vuelto: S/ ${Number(sale.change_amount).toFixed(2)}`,
+    ],
+    items: items.map((i) => ({
+      name: i.name,
+      quantity: i.quantity,
+      unitPrice: i.unit_price,
+      total: i.total,
+      brandName: i.brand_name,
+      categoryName: i.cat_name,
+      modelName: i.model_txt || "-",
+      serialLines: i.serial_number ? [String(i.serial_number)] : [],
+    })),
+    total: sale.total,
+    footer: "Gracias por su compra.",
+  });
+});
+
+app.post("/sales/izipay-prepare", requireAuth, requireModule("sales_pos"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const saleId = Number(req.body.saleId || 0);
+  const sale = saleId
+    ? await get("SELECT * FROM sales WHERE id=? AND company_id=?;", [saleId, companyId])
+    : null;
+  const pt = await get("SELECT * FROM payment_types WHERE company_id=? AND code='TARJETA_IZIPAY' LIMIT 1;", [companyId]);
+  const merchant = pt?.izipay_merchant_code || process.env.IZIPAY_MERCHANT_CODE || "";
+  const keyRSA = pt?.izipay_rsa_public_key || process.env.IZIPAY_RSA_PUBLIC_KEY || "";
+  const auth = process.env.IZIPAY_SESSION_TOKEN || "";
+  res.json({
+    ok: true,
+    documentation: "https://developers.izipay.pe/web-core/quickstart/",
+    sdkScriptSandbox: "https://sandbox-checkout.izipay.pe/payments/v1/js/index.js",
+    authorization: auth,
+    keyRSA,
+    merchantCode: merchant,
+    note:
+      "El token authorization debe generarse en su backend con la API de sesion de Izipay (ver documentacion). Variables opcionales: IZIPAY_SESSION_TOKEN, IZIPAY_RSA_PUBLIC_KEY, IZIPAY_MERCHANT_CODE.",
+    iziConfigExample: sale
+      ? {
+          transactionId: String(sale.id),
+          action: "pay",
+          merchantCode: merchant,
+          order: {
+            orderNumber: sale.voucher_code,
+            currency: "PEN",
+            amount: String(Number(sale.total).toFixed(2)),
+            processType: "AT",
+            merchantBuyerId: `C${companyId}`,
+            dateTimeTransaction: sale.created_at,
+          },
+        }
+      : null,
+  });
+});
+
+app.get("/sales/prices", requireAuth, requireModule("sales_prices"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const qRaw = String(req.query.q || "").trim();
+  const qLike = qRaw ? `%${qRaw.replace(/%/g, "").replace(/_/g, "")}%` : "";
+  const listLimit = qLike ? 250 : 500;
+  let where = "p.company_id=? AND p.status='ACTIVO'";
+  const params = [companyId];
+  if (qLike) {
+    where += " AND (LOWER(p.name) LIKE LOWER(?) OR LOWER(IFNULL(p.sku,'')) LIKE LOWER(?))";
+    params.push(qLike, qLike);
+  }
+  const products = await all(
+    `SELECT p.id, p.name, p.sku,
+      (SELECT pp.price FROM product_prices pp WHERE pp.product_id=p.id AND pp.company_id=p.company_id ORDER BY datetime(pp.effective_date) DESC LIMIT 1) AS last_price,
+      (SELECT pp.effective_date FROM product_prices pp WHERE pp.product_id=p.id AND pp.company_id=p.company_id ORDER BY datetime(pp.effective_date) DESC LIMIT 1) AS last_date
+     FROM products p WHERE ${where} ORDER BY p.name LIMIT ${listLimit};`,
+    params
+  );
+  const ids = products.map((p) => p.id);
+  const byPid = new Map();
+  if (ids.length) {
+    const placeholders = ids.map(() => "?").join(",");
+    const histRows = await all(
+      `SELECT product_id, price, effective_date, note, id FROM product_prices WHERE company_id=? AND product_id IN (${placeholders}) ORDER BY product_id, id DESC;`,
+      [companyId, ...ids]
+    );
+    for (const row of histRows) {
+      const pid = Number(row.product_id);
+      if (!byPid.has(pid)) byPid.set(pid, []);
+      const arr = byPid.get(pid);
+      if (arr.length < 12) arr.push(row);
+    }
+  }
+  const qEsc = escapeHtml(qRaw);
+  const searchForm = `<div style="margin-bottom:18px;padding:14px 16px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc">
+    <strong style="display:block;margin-bottom:8px;font-size:14px">Buscar producto</strong>
+    <form method="get" action="/sales/prices" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+      <input type="search" name="q" value="${qEsc}" placeholder="Nombre o SKU" style="min-width:240px;padding:8px 12px" />
+      <button type="submit">Buscar</button>
+      ${qRaw ? `<a class="badge" href="/sales/prices">Limpiar filtro</a>` : ""}
+    </form></div>`;
+  const rows = products
+    .map((p) => {
+      const hist = byPid.get(Number(p.id)) || [];
+      const hrows = hist
+        .map(
+          (h) =>
+            `<tr><td>${Number(h.price).toFixed(2)}</td><td>${escapeHtml(String(h.effective_date || "-"))}</td><td>${escapeHtml(h.note || "-")}</td></tr>`
+        )
+        .join("");
+      const histBlock =
+        hist.length === 0
+          ? "<p class='muted' style='margin:8px 0 0'>Sin movimientos registrados.</p>"
+          : `<table style="margin-top:8px;font-size:13px;width:100%;max-width:420px"><thead><tr><th>Precio</th><th>Fecha</th><th>Nota</th></tr></thead><tbody>${hrows}</tbody></table>`;
+      return `<tr><td><strong>${escapeHtml(p.name)}</strong><div class="muted">${escapeHtml(p.sku || "")}</div>
+        <details style="margin-top:10px"><summary style="cursor:pointer;font-weight:600;font-size:13px">Ultimos movimientos de precio</summary>${histBlock}</details>
+      </td><td>${p.last_price != null ? Number(p.last_price).toFixed(2) : "-"}</td><td>${escapeHtml(p.last_date || "-")}</td><td>
+        <form method="post" action="/sales/prices" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <input type="hidden" name="productId" value="${p.id}" />
+          <input type="hidden" name="searchQ" value="${qEsc}" />
+          <input type="number" step="0.01" min="0" name="price" placeholder="Nuevo" required style="width:120px"/>
+          <button type="submit" class="btn-compact">Guardar</button>
+        </form></td></tr>`;
+    })
+    .join("");
+  const html = renderAppShell({
+    title: "Precios de venta",
+    subtitle: "Por producto",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_prices",
+    body: `${searchForm}
+    <h3>Actualizar precio</h3>
+    <p class="muted" style="margin-top:4px">Sin texto de busqueda se listan hasta 500 productos por orden de nombre.</p>
+    <table><thead><tr><th>Producto</th><th>Precio vigente</th><th>Desde</th><th></th></tr></thead><tbody>${
+      rows || "<tr><td colspan='4' class='muted'>Sin productos. Use el buscador arriba.</td></tr>"
+    }</tbody></table>`,
+  });
+  res.send(renderLayout("Precios venta", html));
+});
+
+app.post("/sales/prices", requireAuth, requireModule("sales_prices"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const productId = Number(req.body.productId);
+  const price = Number(req.body.price);
+  const retQ = String(req.body.searchQ || "").trim();
+  const qSuffix = retQ ? `&q=${encodeURIComponent(retQ)}` : "";
+  if (!Number.isInteger(productId) || productId < 1 || !Number.isFinite(price) || price < 0) {
+    return res.redirect(`/sales/prices?error=Dato+invalido${qSuffix}`);
+  }
+  const ok = await get("SELECT id FROM products WHERE id=? AND company_id=?;", [productId, companyId]);
+  if (!ok) return res.redirect(`/sales/prices?error=Producto+invalido${qSuffix}`);
+  await run(
+    "INSERT INTO product_prices(company_id, product_id, price, effective_date, note) VALUES (?,?,?,CURRENT_TIMESTAMP,?);",
+    [companyId, productId, price, "Precio venta POS"]
+  );
+  return res.redirect(`/sales/prices?ok=Precio+registrado${qSuffix}`);
+});
+
+app.get("/sales/cash-movements", requireAuth, requireModule("sales_cash_movements"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const filterUserId = req.query.userId != null && String(req.query.userId).trim() !== "" ? Number(req.query.userId) : null;
+  const from = String(req.query.from || "").trim();
+  const to = String(req.query.to || "").trim();
+  const users = await all(
+    "SELECT id, username FROM users WHERE company_id=? AND IFNULL(status,'ACTIVO')='ACTIVO' ORDER BY username;",
+    [companyId]
+  );
+  const userOpts = users
+    .map((u) => {
+      const sel = filterUserId != null && Number.isFinite(filterUserId) && Number(u.id) === filterUserId ? " selected" : "";
+      return `<option value="${u.id}"${sel}>${escapeHtml(u.username)}</option>`;
+    })
+    .join("");
+  let sql = `SELECT m.id, m.created_at, m.movement_kind, m.amount, m.sale_id, m.expense_id,
+      cr.accounting_date, u.username AS user_name, s.voucher_code
+     FROM cash_movements m
+     JOIN cash_registers cr ON cr.id=m.register_id
+     JOIN users u ON u.id=m.user_id
+     LEFT JOIN sales s ON s.id = m.sale_id
+     WHERE m.company_id=? AND m.movement_kind IN ('VENTA','GASTO')`;
+  const sqlParams = [companyId];
+  if (filterUserId != null && Number.isFinite(filterUserId) && filterUserId > 0) {
+    sql += " AND m.user_id=?";
+    sqlParams.push(filterUserId);
+  }
+  if (from) {
+    sql += " AND date(m.created_at) >= date(?)";
+    sqlParams.push(from);
+  }
+  if (to) {
+    sql += " AND date(m.created_at) <= date(?)";
+    sqlParams.push(to);
+  }
+  sql += " ORDER BY m.id DESC LIMIT 300";
+  const rows = await all(sql, sqlParams);
+  let ingresos = 0;
+  let egresos = 0;
+  const body = rows
+    .map((r) => {
+      const isIngreso = String(r.movement_kind) === "VENTA";
+      const imp = Math.round(Math.abs(Number(r.amount || 0)) * 100) / 100;
+      if (isIngreso) ingresos += imp;
+      else egresos += imp;
+      return `<tr>
+        <td>${escapeHtml(r.accounting_date || "-")}</td>
+        <td>${escapeHtml(r.created_at || "-")}</td>
+        <td>${escapeHtml(r.user_name || "-")}</td>
+        <td>${isIngreso ? "INGRESO (VENTA)" : "EGRESO (GASTO)"}</td>
+        <td style="text-align:right;white-space:nowrap">${imp.toFixed(2)}</td>
+        <td>${isIngreso && r.sale_id ? `<a class="badge" href="/sales/pos/sale/${r.sale_id}/pdf">Ver PDF</a>` : "<span class='muted'>-</span>"}</td>
+      </tr>`;
+    })
+    .join("");
+  const fromVal = escapeHtml(from);
+  const toVal = escapeHtml(to);
+  const neto = Math.round((ingresos - egresos) * 100) / 100;
+  const filterBox = `<div style="margin-bottom:18px;padding:14px 16px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc">
+    <strong style="display:block;margin-bottom:8px;font-size:14px">Filtros</strong>
+    <form method="get" action="/sales/cash-movements" class="form-grid" style="align-items:flex-end;margin:0">
+      <div><label class="muted">Usuario</label><select name="userId"><option value="">Todos</option>${userOpts}</select></div>
+      <div><label class="muted">Desde</label><input type="date" name="from" value="${fromVal}" /></div>
+      <div><label class="muted">Hasta</label><input type="date" name="to" value="${toVal}" /></div>
+      <button type="submit">Aplicar</button>
+      <a class="badge" href="/sales/cash-movements">Limpiar</a>
+    </form>
+    <div style="margin-top:10px;display:flex;gap:16px;flex-wrap:wrap">
+      <span><strong>Total ingresos:</strong> S/ ${ingresos.toFixed(2)}</span>
+      <span><strong>Total egresos:</strong> S/ ${egresos.toFixed(2)}</span>
+      <span><strong>Total neto:</strong> S/ ${neto.toFixed(2)}</span>
+    </div></div>`;
+  const html = renderAppShell({
+    title: "Movimientos de caja",
+    subtitle: "Solo ventas y gastos",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_cash_movements",
+    body: `${filterBox}<table><thead><tr><th>Fecha contable</th><th>Fecha registro</th><th>Usuario</th><th>Tipo</th><th>Importe</th><th>PDF</th></tr></thead><tbody>${
+      body || "<tr><td colspan='6'>Sin movimientos</td></tr>"
+    }</tbody></table>`,
+  });
+  res.send(renderLayout("Movs. caja", html));
+});
+
+app.get("/sales/expenses", requireAuth, requireModule("sales_expenses"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.redirect("/sales/cash-registers?error=Abre+caja+para+registrar+gastos");
+  const cats = await all(
+    "SELECT id, name FROM cash_flow_categories WHERE company_id=? AND active=1 AND kind='EGRESO' ORDER BY sort_order, name;",
+    [companyId]
+  );
+  const opts = cats.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
+  const filterUserId = req.query.userId != null && String(req.query.userId).trim() !== "" ? Number(req.query.userId) : null;
+  const filterDate = String(req.query.accountingDate || "").trim();
+  const users = await all(
+    "SELECT id, username FROM users WHERE company_id=? AND IFNULL(status,'ACTIVO')='ACTIVO' ORDER BY username;",
+    [companyId]
+  );
+  const userOpts = users
+    .map((u) => {
+      const sel = filterUserId != null && Number.isFinite(filterUserId) && Number(u.id) === filterUserId ? " selected" : "";
+      return `<option value="${u.id}"${sel}>${escapeHtml(u.username)}</option>`;
+    })
+    .join("");
+  let listSql = `SELECT e.id, e.amount, e.note, e.created_at, c.name AS cat, cr.accounting_date, u.username AS user_name
+     FROM expenses e
+     JOIN cash_flow_categories c ON c.id=e.category_id
+     JOIN cash_registers cr ON cr.id=e.register_id
+     JOIN users u ON u.id=e.user_id
+     WHERE e.company_id=?`;
+  const listParams = [companyId];
+  if (filterUserId != null && Number.isFinite(filterUserId) && filterUserId > 0) {
+    listSql += " AND e.user_id=?";
+    listParams.push(filterUserId);
+  }
+  if (filterDate) {
+    listSql += " AND cr.accounting_date=?";
+    listParams.push(filterDate);
+  }
+  listSql += " ORDER BY e.id DESC LIMIT 200";
+  const list = await all(listSql, listParams);
+  const rows = list
+    .map(
+      (e) =>
+        `<tr><td>${e.id}</td><td>${escapeHtml(e.user_name || "-")}</td><td>${escapeHtml(e.cat)}</td><td>${Number(e.amount).toFixed(
+          2
+        )}</td><td>${escapeHtml(e.note || "-")}</td><td>${escapeHtml(e.accounting_date || "-")}</td><td>${escapeHtml(e.created_at)}</td></tr>`
+    )
+    .join("");
+  const dateVal = filterDate ? escapeHtml(filterDate) : "";
+  const expFilter = `<div style="margin:18px 0;padding:14px 16px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc">
+    <strong style="display:block;margin-bottom:8px;font-size:14px">Filtros del listado</strong>
+    <form method="get" action="/sales/expenses" class="form-grid" style="align-items:flex-end;margin:0">
+      <div><label class="muted">Usuario</label><select name="userId"><option value="">Todos</option>${userOpts}</select></div>
+      <div><label class="muted">Fecha contable (caja)</label><input type="date" name="accountingDate" value="${dateVal}" /></div>
+      <button type="submit">Aplicar</button>
+      <a class="badge" href="/sales/expenses">Limpiar</a>
+    </form></div>`;
+  const html = renderAppShell({
+    title: "Gastos",
+    subtitle: "Registro por caja abierta",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_expenses",
+    body: `<form method="post" action="/sales/expenses"><div class="form-grid">
+      <select name="categoryId" required><option value="">Tipo de gasto</option>${opts}</select>
+      <input type="number" step="0.01" min="0.01" name="amount" required placeholder="Monto" />
+      <input name="note" placeholder="Nota" />
+      </div><button type="submit">Registrar gasto</button></form>
+      <h3 style="margin-top:20px">Gastos registrados</h3>
+      ${expFilter}
+      <table><thead><tr><th>ID</th><th>Usuario</th><th>Tipo</th><th>Monto</th><th>Nota</th><th>Fecha contable</th><th>Registro</th></tr></thead><tbody>${
+        rows || "<tr><td colspan='7'>Sin gastos</td></tr>"
+      }</tbody></table>`,
+  });
+  res.send(renderLayout("Gastos", html));
+});
+
+app.post("/sales/expenses", requireAuth, requireModule("sales_expenses"), async (req, res) => {
+  const { companyId, id: userId } = req.session.user;
+  const reg = await getOpenCashRegister(companyId, userId);
+  if (!reg) return res.redirect("/sales/cash-registers?error=Sin+caja+abierta");
+  const catId = Number(req.body.categoryId);
+  const amount = Number(req.body.amount);
+  const note = String(req.body.note || "").trim();
+  const cat = await get("SELECT id FROM cash_flow_categories WHERE id=? AND company_id=? AND kind='EGRESO';", [
+    catId,
+    companyId,
+  ]);
+  if (!cat || !Number.isFinite(amount) || amount <= 0) return res.redirect("/sales/expenses?error=Dato+invalido");
+  await run(
+    "INSERT INTO expenses(company_id,register_id,category_id,user_id,amount,note) VALUES (?,?,?,?,?,?);",
+    [companyId, reg.id, catId, userId, amount, note]
+  );
+  const exp = await get("SELECT id FROM expenses WHERE company_id=? ORDER BY id DESC LIMIT 1;", [companyId]);
+  await run(
+    "INSERT INTO cash_movements(company_id,register_id,user_id,movement_kind,amount,description,expense_id) VALUES (?,?,?,?,?,?,?);",
+    [companyId, reg.id, userId, "GASTO", -Math.abs(amount), note || "Gasto", exp.id]
+  );
+  return res.redirect("/sales/expenses?ok=Gasto+registrado");
+});
+
+app.get("/sales/flow-categories", requireAuth, requireModule("sales_flow_categories"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const ok = req.query.ok ? `<div class="ok">${escapeHtml(req.query.ok)}</div>` : "";
+  const err = req.query.error ? `<div class="error">${escapeHtml(req.query.error)}</div>` : "";
+  const rows = await all(
+    "SELECT * FROM cash_flow_categories WHERE company_id=? ORDER BY sort_order, id;",
+    [companyId]
+  );
+  const body = rows
+    .map(
+      (r) =>
+        `<tr>
+          <td>
+            <form method="post" action="/sales/flow-categories/${r.id}/update" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input name="name" value="${escapeHtml(r.name)}" required style="min-width:180px" />
+              <select name="kind">
+                <option value="EGRESO" ${String(r.kind) === "EGRESO" ? "selected" : ""}>Egreso</option>
+                <option value="INGRESO" ${String(r.kind) === "INGRESO" ? "selected" : ""}>Ingreso</option>
+                <option value="INFO" ${String(r.kind) === "INFO" ? "selected" : ""}>Info</option>
+              </select>
+              <input type="number" name="sortOrder" value="${Number(r.sort_order || 0)}" min="0" style="width:86px" />
+              <button type="submit" class="btn-compact">Guardar</button>
+            </form>
+          </td>
+          <td>${escapeHtml(r.kind)}</td>
+          <td>${r.active ? "SI" : "NO"}</td>
+          <td>
+            <form method="post" action="/sales/flow-categories/${r.id}/toggle" style="display:inline">
+              <button type="submit" class="btn-compact">${r.active ? "Desactivar" : "Activar"}</button>
+            </form>
+          </td>
+        </tr>`
+    )
+    .join("");
+  const html = renderAppShell({
+    title: "Tipos ingreso / gasto",
+    subtitle: "Clasificacion contable interna",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_flow_categories",
+    body: `${ok}${err}<form method="post" action="/sales/flow-categories"><div class="form-grid">
+      <input name="name" placeholder="Nombre (ej. Peaje)" required />
+      <select name="kind"><option value="EGRESO">Egreso (gasto)</option><option value="INGRESO">Ingreso</option><option value="INFO">Informativo / recaudo</option></select>
+      </div><button type="submit">Agregar tipo</button></form>
+      <h3 style="margin-top:18px">Tipos actuales</h3><table><thead><tr><th>Configuracion</th><th>Clase</th><th>Activo</th><th>Accion</th></tr></thead><tbody>${
+        body || "<tr><td colspan='4'>Sin datos</td></tr>"
+      }</tbody></table>`,
+  });
+  res.send(renderLayout("Tipos flujo", html));
+});
+
+app.post("/sales/flow-categories", requireAuth, requireModule("sales_flow_categories"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const name = String(req.body.name || "").trim();
+  const kind = String(req.body.kind || "EGRESO").toUpperCase();
+  if (!name) return res.redirect("/sales/flow-categories?error=Nombre+requerido");
+  if (!["EGRESO", "INGRESO", "INFO"].includes(kind)) return res.redirect("/sales/flow-categories?error=Tipo+invalido");
+  try {
+    await run(
+      "INSERT INTO cash_flow_categories(company_id,name,kind,sort_order,active) VALUES (?,?,?,(SELECT IFNULL(MAX(sort_order),0)+1 FROM cash_flow_categories x WHERE x.company_id=?),1);",
+      [companyId, name, kind, companyId]
+    );
+  } catch {
+    return res.redirect("/sales/flow-categories?error=Duplicado+o+invalido");
+  }
+  return res.redirect("/sales/flow-categories?ok=Creado");
+});
+
+app.post("/sales/flow-categories/:id/update", requireAuth, requireModule("sales_flow_categories"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const id = Number(req.params.id);
+  const name = String(req.body.name || "").trim();
+  const kind = String(req.body.kind || "EGRESO").toUpperCase();
+  const sortOrder = Math.max(0, Math.floor(Number(req.body.sortOrder || 0)));
+  if (!id || !name) return res.redirect("/sales/flow-categories?error=Datos+invalidos");
+  if (!["EGRESO", "INGRESO", "INFO"].includes(kind)) return res.redirect("/sales/flow-categories?error=Tipo+invalido");
+  try {
+    await run(
+      "UPDATE cash_flow_categories SET name=?, kind=?, sort_order=? WHERE id=? AND company_id=?;",
+      [name, kind, sortOrder, id, companyId]
+    );
+  } catch {
+    return res.redirect("/sales/flow-categories?error=No+se+pudo+actualizar+(duplicado)");
+  }
+  return res.redirect("/sales/flow-categories?ok=Tipo+actualizado");
+});
+
+app.post("/sales/flow-categories/:id/toggle", requireAuth, requireModule("sales_flow_categories"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const id = Number(req.params.id);
+  await run(
+    "UPDATE cash_flow_categories SET active=CASE WHEN active=1 THEN 0 ELSE 1 END WHERE id=? AND company_id=?;",
+    [id, companyId]
+  );
+  return res.redirect("/sales/flow-categories?ok=Estado+actualizado");
+});
+
+app.get("/sales/cash-denominations", requireAuth, requireModule("sales_cash_denominations"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const ok = req.query.ok ? `<div class="ok">${escapeHtml(req.query.ok)}</div>` : "";
+  const err = req.query.error ? `<div class="error">${escapeHtml(req.query.error)}</div>` : "";
+  const rows = await getCashDenominations(companyId, false);
+  const body = rows
+    .map(
+      (r) => `<tr>
+      <td>
+        <form method="post" action="/sales/cash-denominations/${r.id}/update" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input name="name" value="${escapeHtml(r.name)}" required style="min-width:180px" />
+          <input type="number" name="value" step="0.01" min="0.01" value="${Number(r.value).toFixed(2)}" style="width:110px" required />
+          <input type="number" name="sortOrder" min="0" value="${Number(r.sort_order || 0)}" style="width:86px" />
+          <button type="submit" class="btn-compact">Guardar</button>
+        </form>
+      </td>
+      <td>${r.active ? "SI" : "NO"}</td>
+      <td><form method="post" action="/sales/cash-denominations/${r.id}/toggle"><button type="submit" class="btn-compact">${
+        r.active ? "Desactivar" : "Activar"
+      }</button></form></td>
+    </tr>`
+    )
+    .join("");
+  const html = renderAppShell({
+    title: "Monedas / billetes",
+    subtitle: "Configuracion del reconteo de cierre",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "company",
+    activeSection: "sales_cash_denominations",
+    body: `${ok}${err}
+      <form method="post" action="/sales/cash-denominations"><div class="form-grid">
+        <input name="name" placeholder="Nombre (ej. 100 soles)" required />
+        <input type="number" name="value" step="0.01" min="0.01" placeholder="Valor" required />
+      </div><button type="submit">Agregar moneda/billete</button></form>
+      <h3 style="margin-top:18px">Listado</h3>
+      <table><thead><tr><th>Configuracion</th><th>Activo</th><th>Accion</th></tr></thead><tbody>${
+        body || "<tr><td colspan='3' class='muted'>Sin configuracion.</td></tr>"
+      }</tbody></table>`,
+  });
+  res.send(renderLayout("Monedas billetes", html));
+});
+
+app.post("/sales/cash-denominations", requireAuth, requireModule("sales_cash_denominations"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const name = String(req.body.name || "").trim();
+  const value = Number(req.body.value);
+  if (!name || !Number.isFinite(value) || value <= 0) return res.redirect("/sales/cash-denominations?error=Dato+invalido");
+  const seq = await get("SELECT IFNULL(MAX(sort_order),0)+1 AS n FROM cash_denominations WHERE company_id=?;", [companyId]);
+  await run(
+    "INSERT INTO cash_denominations(company_id,name,value,sort_order,active) VALUES (?,?,?,?,1);",
+    [companyId, name, value, Number(seq?.n || 1)]
+  );
+  return res.redirect("/sales/cash-denominations?ok=Agregado");
+});
+
+app.post(
+  "/sales/cash-denominations/:id/update",
+  requireAuth,
+  requireModule("sales_cash_denominations"),
+  async (req, res) => {
+    const { companyId } = req.session.user;
+    const id = Number(req.params.id);
+    const name = String(req.body.name || "").trim();
+    const value = Number(req.body.value);
+    const sortOrder = Math.max(0, Math.floor(Number(req.body.sortOrder || 0)));
+    if (!id || !name || !Number.isFinite(value) || value <= 0) {
+      return res.redirect("/sales/cash-denominations?error=Dato+invalido");
+    }
+    await run("UPDATE cash_denominations SET name=?, value=?, sort_order=? WHERE id=? AND company_id=?;", [
+      name,
+      value,
+      sortOrder,
+      id,
+      companyId,
+    ]);
+    return res.redirect("/sales/cash-denominations?ok=Actualizado");
+  }
+);
+
+app.post(
+  "/sales/cash-denominations/:id/toggle",
+  requireAuth,
+  requireModule("sales_cash_denominations"),
+  async (req, res) => {
+    const { companyId } = req.session.user;
+    const id = Number(req.params.id);
+    await run(
+      "UPDATE cash_denominations SET active=CASE WHEN active=1 THEN 0 ELSE 1 END WHERE id=? AND company_id=?;",
+      [id, companyId]
+    );
+    return res.redirect("/sales/cash-denominations?ok=Estado+actualizado");
+  }
+);
+
+app.get("/sales/payment-types", requireAuth, requireModule("sales_payment_types"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  await ensureSalesDefaults(companyId);
+  const rows = await all("SELECT * FROM payment_types WHERE company_id=? ORDER BY sort_order, id;", [companyId]);
+  const body = rows
+    .map((r) => {
+      const iz = Number(r.is_izipay) === 1;
+      return `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.code)}</td><td>${r.active ? "Activo" : "Inactivo"}</td><td>${
+        iz ? "Izipay" : "-"
+      }</td><td>
+        <form method="post" action="/sales/payment-types/${r.id}/toggle" style="display:inline"><button type="submit" class="btn-compact">${
+          r.active ? "Desactivar" : "Activar"
+        }</button></form>
+        ${
+          iz
+            ? `<form method="post" action="/sales/payment-types/${r.id}/izipay" style="margin-top:8px">
+            <input name="merchantCode" placeholder="Merchant code Izipay" value="${escapeHtml(r.izipay_merchant_code || "")}" />
+            <textarea name="rsaPublic" placeholder="Llave publica RSA (PEM o texto segun doc Izipay)" rows="2">${escapeHtml(
+              r.izipay_rsa_public_key || ""
+            )}</textarea>
+            <label><input type="checkbox" name="sandbox" value="1" ${Number(r.izipay_sandbox) === 1 ? "checked" : ""} style="width:auto"/> Sandbox</label>
+            <button type="submit" class="btn-compact">Guardar Izipay</button></form>
+            <p class="muted"><a href="https://developers.izipay.pe/web-core/quickstart/" target="_blank" rel="noopener">Documentacion Izipay</a></p>`
+            : ""
+        }
+      </td></tr>`;
+    })
+    .join("");
+  const html = renderAppShell({
+    title: "Tipos de pago",
+    subtitle: "Efectivo, transferencia, tarjeta (Izipay)",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_payment_types",
+    body: `<p class="muted">Izipay: el <strong>token de sesion (authorization)</strong> debe obtenerse en backend con su API oficial; puede usar variables de entorno para pruebas.</p>
+      <table><thead><tr><th>Nombre</th><th>Codigo</th><th>Estado</th><th>Integracion</th><th></th></tr></thead><tbody>${body}</tbody></table>`,
+  });
+  res.send(renderLayout("Tipos de pago", html));
+});
+
+app.post("/sales/payment-types/:id/toggle", requireAuth, requireModule("sales_payment_types"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const id = Number(req.params.id);
+  await run(
+    "UPDATE payment_types SET active = CASE WHEN active=1 THEN 0 ELSE 1 END WHERE id=? AND company_id=?;",
+    [id, companyId]
+  );
+  return res.redirect("/sales/payment-types");
+});
+
+app.post("/sales/payment-types/:id/izipay", requireAuth, requireModule("sales_payment_types"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const id = Number(req.params.id);
+  const merchant = String(req.body.merchantCode || "").trim();
+  const rsa = String(req.body.rsaPublic || "").trim();
+  const sandbox = req.body.sandbox ? 1 : 0;
+  await run(
+    "UPDATE payment_types SET izipay_merchant_code=?, izipay_rsa_public_key=?, izipay_sandbox=? WHERE id=? AND company_id=? AND is_izipay=1;",
+    [merchant || null, rsa || null, sandbox, id, companyId]
+  );
+  return res.redirect("/sales/payment-types?ok=Izipay+actualizado");
+});
+
+app.get("/sales/reports", requireAuth, requireModule("sales_reports"), async (req, res) => {
+  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const productId = Number(req.query.productId || 0);
+  let where = "s.company_id=?";
+  const params = [companyId];
+  if (productId > 0) {
+    where += " AND si.product_id=?";
+    params.push(productId);
+  }
+  const rows = await all(
+    `SELECT p.name, SUM(si.quantity) AS qty, SUM(si.total) AS total
+     FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+     WHERE ${where}
+     GROUP BY si.product_id ORDER BY total DESC LIMIT 100;`,
+    params
+  );
+  const body = rows
+    .map((r) => `<tr><td>${escapeHtml(r.name)}</td><td>${r.qty}</td><td>${Number(r.total).toFixed(2)}</td></tr>`)
+    .join("");
+  const prods = await all("SELECT id, name FROM products WHERE company_id=? AND status='ACTIVO' ORDER BY name LIMIT 300;", [
+    companyId,
+  ]);
+  const opts = `<option value="0">Todos</option>${prods.map((p) => `<option value="${p.id}" ${productId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}`;
+  const html = renderAppShell({
+    title: "Reportes de ventas",
+    subtitle: "Ventas por producto",
+    companyName,
+    username,
+    allowedModules,
+    activeGroup: "sales",
+    activeSection: "sales_reports",
+    body: `<form method="get" action="/sales/reports"><select name="productId">${opts}</select><button type="submit" class="btn-compact">Filtrar</button></form>
+      <table><thead><tr><th>Producto</th><th>Cantidad vendida</th><th>Importe</th></tr></thead><tbody>${
+        body || "<tr><td colspan='3'>Sin ventas</td></tr>"
+      }</tbody></table>`,
+  });
+  res.send(renderLayout("Reportes ventas", html));
+});
 
 app.get("/dashboard", requireAuth, requireModule("dashboard"), async (req, res) => {
   const { companyId, companyName, username, allowedModules } = req.session.user;
@@ -2479,8 +5285,6 @@ app.get("/scan/product", async (req, res) => {
 
 app.get("/stock", requireAuth, requireModule("stock"), async (req, res) => {
   const { companyId, companyName, allowedModules, username } = req.session.user;
-  const from = req.query.from || "";
-  const to = req.query.to || "";
   const productId = Number(req.query.productId || 0);
   const depositId = Number(req.query.depositId || 0);
   const sectorId = Number(req.query.sectorId || 0);
@@ -2536,15 +5340,13 @@ app.get("/stock", requireAuth, requireModule("stock"), async (req, res) => {
         <h3>Filtros</h3>
         <a href="/exports/stock?productId=${encodeURIComponent(productId || "")}&depositId=${encodeURIComponent(
           depositId || ""
-        )}&sectorId=${encodeURIComponent(sectorId || "")}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}" class="badge">Exportar Excel</a>
+        )}&sectorId=${encodeURIComponent(sectorId || "")}" class="badge">Exportar Excel</a>
       </div>
       <form method="get" action="/stock">
         <div class="form-grid">
           <select name="productId"><option value="">Producto</option>${productOptions}</select>
           <select name="depositId" id="sDeposit"><option value="">Deposito</option>${depositOptions}</select>
           <select name="sectorId" id="sSector"><option value="">Sector</option>${sectorOptions}</select>
-          <input type="date" name="from" value="${escapeHtml(from)}" />
-          <input type="date" name="to" value="${escapeHtml(to)}" />
         </div>
         <button type="submit">Aplicar filtro</button>
       </form>
