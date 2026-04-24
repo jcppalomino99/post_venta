@@ -1,9 +1,16 @@
-const fs = require("fs/promises");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
+const fs = require("fs/promises");
 const initSqlJs = require("sql.js");
 
-const DB_DIR = path.join(__dirname, "..", "data");
-const DB_PATH = path.join(DB_DIR, "postventa.sqlite");
+const defaultDbPath = path.join(__dirname, "..", "data", "postventa.sqlite");
+const DB_PATH = process.env.DB_PATH
+  ? path.isAbsolute(process.env.DB_PATH)
+    ? process.env.DB_PATH
+    : path.resolve(process.cwd(), process.env.DB_PATH)
+  : defaultDbPath;
+const DB_DIR = path.dirname(DB_PATH);
 
 let SQL;
 let db;

@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const session = require("express-session");
 const PDFDocument = require("pdfkit");
@@ -7,14 +9,18 @@ const path = require("path");
 const QRCode = require("qrcode");
 const { all, get, run, reloadFromDisk } = require("./db");
 
-require("dotenv").config();
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-const uploadsRoot = path.join(__dirname, "..", "uploads", "products");
-const ingressDocsRoot = path.join(__dirname, "..", "uploads", "ingress-docs");
-const companyLogosRoot = path.join(__dirname, "..", "uploads", "company-logos");
-const companyBackgroundsRoot = path.join(__dirname, "..", "uploads", "company-backgrounds");
+const uploadsBaseDefault = path.join(__dirname, "..", "uploads");
+const uploadsBase = process.env.UPLOADS_DIR
+  ? path.isAbsolute(process.env.UPLOADS_DIR)
+    ? process.env.UPLOADS_DIR
+    : path.resolve(process.cwd(), process.env.UPLOADS_DIR)
+  : uploadsBaseDefault;
+const uploadsRoot = path.join(uploadsBase, "products");
+const ingressDocsRoot = path.join(uploadsBase, "ingress-docs");
+const companyLogosRoot = path.join(uploadsBase, "company-logos");
+const companyBackgroundsRoot = path.join(uploadsBase, "company-backgrounds");
 
 if (!fs.existsSync(uploadsRoot)) {
   fs.mkdirSync(uploadsRoot, { recursive: true });
@@ -97,7 +103,7 @@ const companySlugCacheByName = new Map();
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "1mb" }));
-app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
+app.use("/uploads", express.static(uploadsBase));
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "postventa_secret_demo",

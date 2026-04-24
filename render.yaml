@@ -1,0 +1,17 @@
+# Blueprint Render: disco persistente en /var/data (no se pierde al redeploy).
+# En un servicio ya creado, si el disco no aparece: Dashboard → Settings → Disks → crear y montar /var/data.
+services:
+  - type: web
+    name: post-venta
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    disk:
+      name: postventa-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /var/data/postventa.sqlite
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
