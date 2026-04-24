@@ -7,11 +7,14 @@ const path = require("path");
 const QRCode = require("qrcode");
 const { all, get, run, reloadFromDisk } = require("./db");
 
+require("dotenv").config();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const uploadsRoot = path.join(__dirname, "..", "uploads", "products");
 const ingressDocsRoot = path.join(__dirname, "..", "uploads", "ingress-docs");
 const companyLogosRoot = path.join(__dirname, "..", "uploads", "company-logos");
+const companyBackgroundsRoot = path.join(__dirname, "..", "uploads", "company-backgrounds");
 
 if (!fs.existsSync(uploadsRoot)) {
   fs.mkdirSync(uploadsRoot, { recursive: true });
@@ -21,6 +24,9 @@ if (!fs.existsSync(ingressDocsRoot)) {
 }
 if (!fs.existsSync(companyLogosRoot)) {
   fs.mkdirSync(companyLogosRoot, { recursive: true });
+}
+if (!fs.existsSync(companyBackgroundsRoot)) {
+  fs.mkdirSync(companyBackgroundsRoot, { recursive: true });
 }
 
 const upload = multer({
@@ -65,6 +71,29 @@ const uploadCompanyLogo = multer({
     cb(null, Boolean(ok));
   },
 });
+
+const uploadCompanyAssets = multer({
+  storage: multer.diskStorage({
+    destination: (_, file, cb) => {
+      const isBg = String(file.fieldname || "") === "public_background";
+      cb(null, isBg ? companyBackgroundsRoot : companyLogosRoot);
+    },
+    filename: (_, file, cb) => {
+      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+      cb(null, `${Date.now()}_${safe}`);
+    },
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_, file, cb) => {
+    const ok = ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.mimetype);
+    cb(null, Boolean(ok));
+  },
+});
+
+const companyLogoCacheById = new Map();
+const companyLogoCacheByName = new Map();
+const companySlugCacheById = new Map();
+const companySlugCacheByName = new Map();
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json({ limit: "1mb" }));
@@ -151,10 +180,50 @@ async function migrateProductSerialsRemoveGlobalUnique() {
   await run(`CREATE INDEX IF NOT EXISTS idx_ps_company_serial ON product_serials(company_id, serial_number);`);
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   if (!req.session.user) {
     return res.redirect("/login");
   }
+  try {
+    const companyId = Number(req.session.user.companyId || 0);
+    const companyName = String(req.session.user.companyName || "").trim();
+    let logo = String(req.session.user.companyLogoPath || "").trim();
+    let slug = String(req.session.user.companySlug || "").trim();
+    if (!logo && companyId > 0 && companyLogoCacheById.has(companyId)) {
+      logo = String(companyLogoCacheById.get(companyId) || "").trim();
+    }
+    if (!logo && companyName && companyLogoCacheByName.has(companyName)) {
+      logo = String(companyLogoCacheByName.get(companyName) || "").trim();
+    }
+    if (!slug && companyId > 0 && companySlugCacheById.has(companyId)) {
+      slug = String(companySlugCacheById.get(companyId) || "").trim();
+    }
+    if (!slug && companyName && companySlugCacheByName.has(companyName)) {
+      slug = String(companySlugCacheByName.get(companyName) || "").trim();
+    }
+    if ((!logo || !slug) && companyId > 0) {
+      const row = await get(
+        "SELECT IFNULL(logo_path,'') AS logo_path, IFNULL(name,'') AS name, IFNULL(slug,'') AS slug FROM companies WHERE id=?;",
+        [companyId]
+      );
+      logo = String(row?.logo_path || "").trim();
+      slug = String(row?.slug || "").trim();
+      const dbName = String(row?.name || "").trim();
+      if (dbName && !companyName) req.session.user.companyName = dbName;
+      if (dbName && logo) companyLogoCacheByName.set(dbName, logo);
+      if (dbName && slug) companySlugCacheByName.set(dbName, slug);
+    }
+    if (companyId > 0 && logo) {
+      req.session.user.companyLogoPath = logo;
+      companyLogoCacheById.set(companyId, logo);
+      if (companyName) companyLogoCacheByName.set(companyName, logo);
+    }
+    if (companyId > 0 && slug) {
+      req.session.user.companySlug = slug;
+      companySlugCacheById.set(companyId, slug);
+      if (companyName) companySlugCacheByName.set(companyName, slug);
+    }
+  } catch {}
   return next();
 }
 
@@ -162,6 +231,7 @@ function renderAppShell({
   title,
   subtitle = "",
   companyName,
+  companyLogoPath = "",
   username,
   allowedModules = [],
   activeGroup = "",
@@ -190,15 +260,46 @@ function renderAppShell({
     })
     .join("");
 
+  const cleanName = String(companyName || "").trim();
+  const companySlug = String(companySlugCacheByName.get(cleanName) || "").trim();
+  const publicCatalogLink = companySlug ? `/public/${encodeURIComponent(companySlug)}/catalog` : "";
+  const groupCardsWithPublic = `${groupCards}${
+    publicCatalogLink
+      ? `<a class="launcher-card launcher-card--compact" href="${publicCatalogLink}">
+           <span class="launcher-card-title">Catalogo publico</span>
+           <span class="launcher-card-sub">Volver al catalogo de tu empresa</span>
+         </a>`
+      : ""
+  }`;
+  const initials = escapeHtml(
+    cleanName
+      ? cleanName
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((w) => w.slice(0, 1).toUpperCase())
+          .join("")
+      : "PV"
+  );
+  const logoPath = String(
+    companyLogoPath || companyLogoCacheByName.get(cleanName) || ""
+  ).trim();
+  const logoBlock = logoPath
+    ? `<img src="${escapeHtml(logoPath)}" alt="Logo" />`
+    : `<div class="sidebar-logo-avatar" aria-hidden="true">${initials}</div>`;
+
+  const safeBody = String(body || "").trim()
+    ? body
+    : `<div class="empty-box">
+         <strong style="display:block;font-size:15px;color:#0f172a;margin-bottom:6px">Selecciona una opción</strong>
+         <div class="muted">Elige un apartado del menú lateral para comenzar.</div>
+       </div>`;
+
   return `
     <div class="app-shell">
       <div class="nav-drawer-backdrop" id="navDrawerBackdrop" onclick="closeNavDrawer()" aria-hidden="true"></div>
       <aside class="side-panel" id="navDrawer" aria-label="Menu lateral">
-        <div class="brand-block">
-          <div class="brand-title">POST VENTA</div>
-          <div class="brand-subtitle">Electrodomesticos</div>
-        </div>
-        <div class="side-section-title">${escapeHtml(group ? group.label : "Navegacion")}</div>
+        <div class="sidebar-logo">${logoBlock}</div>
         <div class="side-links">${sectionLinks || "<div class='muted'>Sin apartados</div>"}</div>
       </aside>
       <main class="main-panel">
@@ -208,24 +309,27 @@ function renderAppShell({
           <div class="topbar-actions">
             <div class="module-launcher-wrap">
               <button type="button" class="module-launcher-button" id="moduleLauncherBtn" onclick="toggleModulePanel(event)" aria-expanded="false" aria-haspopup="dialog">Modulos</button>
-              <div id="module-panel-backdrop" class="module-panel-backdrop" onclick="closeModulePanel()" aria-hidden="true"></div>
-              <div id="module-panel" class="module-panel" role="dialog" aria-modal="true" aria-labelledby="modulePanelTitle">
-                <div class="module-panel-header">
-                  <span id="modulePanelTitle">Ir a modulo</span>
-                  <button type="button" class="module-panel-close" onclick="closeModulePanel()" aria-label="Cerrar">&times;</button>
-                </div>
-                <div class="module-panel-grid">
-                  ${groupCards || "<p class='muted module-panel-empty'>No tienes modulos habilitados.</p>"}
-                </div>
-              </div>
             </div>
-            <form method="post" action="/logout"><button type="submit" class="danger-button">Salir</button></form>
+            <form method="post" action="/logout">
+              <input type="hidden" name="redirectTo" value="${escapeHtml(publicCatalogLink || "/login")}" />
+              <button type="submit" class="danger-button">Salir</button>
+            </form>
           </div>
         </div>
         <section class="content-card">
-          ${body}
+          ${safeBody}
         </section>
       </main>
+    </div>
+    <div id="module-panel-backdrop" class="module-panel-backdrop" onclick="closeModulePanel()" aria-hidden="true"></div>
+    <div id="module-panel" class="module-panel" role="dialog" aria-modal="true" aria-labelledby="modulePanelTitle">
+      <div class="module-panel-header">
+        <span id="modulePanelTitle">Ir a modulo</span>
+        <button type="button" class="module-panel-close" onclick="closeModulePanel()" aria-label="Cerrar">&times;</button>
+      </div>
+      <div class="module-panel-grid">
+        ${groupCardsWithPublic || "<p class='muted module-panel-empty'>No tienes modulos habilitados.</p>"}
+      </div>
     </div>
     <script>
       function refreshOverlayBodyLock() {
@@ -274,12 +378,14 @@ function renderAppShell({
         setModulePanelOpen(false);
       }
       document.addEventListener("click", function(event) {
-        var wrap = document.querySelector(".module-launcher-wrap");
+        var btn = document.getElementById("moduleLauncherBtn");
         var panel = document.getElementById("module-panel");
-        if (!panel || !wrap) return;
-        if (panel.classList.contains("open") && !wrap.contains(event.target)) {
-          closeModulePanel();
-        }
+        var back = document.getElementById("module-panel-backdrop");
+        if (!panel) return;
+        if (!panel.classList.contains("open")) return;
+        if (back && event.target === back) return;
+        if (btn && btn.contains(event.target)) return;
+        if (!panel.contains(event.target)) closeModulePanel();
       });
       document.addEventListener("keydown", function(e) {
         if (e.key === "Escape") {
@@ -307,6 +413,61 @@ async function ensureSchema() {
   try {
     await run("ALTER TABLE companies ADD COLUMN cash_reopen_days INTEGER NOT NULL DEFAULT 7;");
   } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN slug TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_title TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_description TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_mission TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_vision TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_contact TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_background_path TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN email TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN phone TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN whatsapp TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN address TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN city TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN country TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN latitude REAL;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN longitude REAL;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN website TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN business_hours TEXT;");
+  } catch {}
+  try {
+    await run("ALTER TABLE companies ADD COLUMN public_features TEXT;");
+  } catch {}
+  await run("CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_slug_unique ON companies(slug);");
 
   await run(`
     CREATE TABLE IF NOT EXISTS workers (
@@ -469,7 +630,13 @@ async function ensureSchema() {
     await run("ALTER TABLE products ADD COLUMN image_path TEXT;");
   } catch {}
   try {
+    await run("ALTER TABLE products ADD COLUMN description TEXT;");
+  } catch {}
+  try {
     await run("ALTER TABLE products ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVO';");
+  } catch {}
+  try {
+    await run("ALTER TABLE products ADD COLUMN is_public INTEGER NOT NULL DEFAULT 1;");
   } catch {}
 
   await run(`
@@ -875,7 +1042,6 @@ async function ensureSchema() {
 }
 
 const MODULES = [
-  { key: "dashboard", label: "Inicio" },
   { key: "workers", label: "Trabajadores" },
   { key: "users", label: "Usuarios" },
   { key: "profiles", label: "Perfiles" },
@@ -887,7 +1053,7 @@ const MODULES = [
   { key: "categories", label: "Categorias" },
   { key: "requests", label: "Solicitudes" },
   { key: "purchases", label: "Compras" },
-  { key: "approvers", label: "Aprobadores" },
+  { key: "approvers", label: "Flujos de aprobacion" },
   { key: "approvals_requests", label: "Aprobacion Solicitudes" },
   { key: "approvals_purchases", label: "Aprobacion Compras" },
   { key: "deposits", label: "Depositos" },
@@ -910,13 +1076,6 @@ const MODULES = [
 
 const MODULE_GROUPS = [
   {
-    key: "home",
-    label: "Inicio",
-    subtitle: "Resumen general",
-    path: "/dashboard",
-    sections: [{ moduleKey: "dashboard", label: "Dashboard", path: "/dashboard" }],
-  },
-  {
     key: "user-management",
     label: "Gestion de usuarios",
     subtitle: "Usuarios y perfiles",
@@ -924,7 +1083,7 @@ const MODULE_GROUPS = [
     sections: [
       { moduleKey: "users", label: "Usuarios", path: "/users" },
       { moduleKey: "profiles", label: "Perfiles", path: "/profiles" },
-      { moduleKey: "approvers", label: "Aprobadores", path: "/approvers" },
+      { moduleKey: "approvers", label: "Flujos de aprobacion", path: "/approvers" },
     ],
   },
   {
@@ -994,9 +1153,9 @@ function getVisibleModuleGroups(allowedModules = []) {
 }
 
 function getDefaultLandingPath(allowedModules = []) {
-  if (allowedModules.includes("dashboard")) return "/dashboard";
+  if (allowedModules.includes("products") || allowedModules.includes("stock")) return "/modules/logistics";
   const firstGroup = getVisibleModuleGroups(allowedModules)[0];
-  return firstGroup ? firstGroup.path : "/login";
+  return firstGroup ? firstGroup.path : "/modules/logistics";
 }
 
 const PRIMARY_COMPANY_NAME = "ALLIN GROUP - JAVIER PRADO S.A.";
@@ -1040,7 +1199,7 @@ async function ensureCompanyProfiles(companyId) {
   await run("INSERT OR IGNORE INTO profiles(company_id, name, description) VALUES (?, ?, ?);", [
     companyId,
     "Operador",
-    "Acceso solo a dashboard",
+    "Acceso basico a logistica",
   ]);
 
   const admin = await get("SELECT id FROM profiles WHERE company_id = ? AND name = 'Administrador';", [companyId]);
@@ -1063,7 +1222,7 @@ async function ensureCompanyProfiles(companyId) {
     if (operator?.id) {
       await run(
         "INSERT OR IGNORE INTO profile_modules(profile_id, module_key, can_access) VALUES (?, ?, ?);",
-        [operator.id, moduleDef.key, moduleDef.key === "dashboard" ? 1 : 0]
+        [operator.id, moduleDef.key, moduleDef.key === "products" || moduleDef.key === "stock" ? 1 : 0]
       );
     }
   }
@@ -1170,6 +1329,40 @@ async function consumeInventoryLocations(companyId, productId, qty) {
 function csvEscape(value) {
   const raw = value == null ? "" : String(value);
   return `"${raw.replaceAll('"', '""')}"`;
+}
+
+function slugifyCompanyName(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+async function ensureCompanySlug(companyId, preferredBase) {
+  const current = await get("SELECT slug, name FROM companies WHERE id=?;", [companyId]);
+  if (!current) return null;
+  if (String(current.slug || "").trim()) return String(current.slug);
+  let base = slugifyCompanyName(preferredBase || current.name || `empresa-${companyId}`);
+  if (!base) base = `empresa-${companyId}`;
+  let candidate = base;
+  let i = 2;
+  while (true) {
+    const used = await get("SELECT id FROM companies WHERE slug=? AND id<>?;", [candidate, companyId]);
+    if (!used) break;
+    candidate = `${base}-${i++}`;
+  }
+  await run("UPDATE companies SET slug=? WHERE id=?;", [candidate, companyId]);
+  return candidate;
+}
+
+async function ensureAllCompanySlugs() {
+  const rows = await all("SELECT id, name FROM companies WHERE status='ACT' ORDER BY id;");
+  for (const row of rows) {
+    await ensureCompanySlug(Number(row.id), String(row.name || ""));
+  }
 }
 
 function sendCsv(res, filename, columns, rows) {
@@ -1699,7 +1892,7 @@ function requireModule(moduleKey) {
       return res.status(403).send(
         renderLayout(
           "Acceso denegado",
-          `<div class="container"><h2>Sin permisos</h2><p>No tienes acceso al modulo solicitado.</p><p><a href="/dashboard">Volver al inicio</a></p></div>`
+          `<div class="container"><h2>Sin permisos</h2><p>No tienes acceso al modulo solicitado.</p><p><a href="/modules/logistics">Volver al inicio</a></p></div>`
         )
       );
     }
@@ -1715,7 +1908,7 @@ function requireAnyModule(moduleKeys) {
       return res.status(403).send(
         renderLayout(
           "Acceso denegado",
-          `<div class="container"><h2>Sin permisos</h2><p>No tienes acceso al modulo solicitado.</p><p><a href="/dashboard">Volver al inicio</a></p></div>`
+          `<div class="container"><h2>Sin permisos</h2><p>No tienes acceso al modulo solicitado.</p><p><a href="/modules/logistics">Volver al inicio</a></p></div>`
         )
       );
     }
@@ -1731,21 +1924,67 @@ function renderLayout(title, content) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${escapeHtml(title)}</title>
     <style>
-      body { margin: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; background: #eef2f7; color: #0f172a; }
+      :root{
+        --bg:#f3f5f8;
+        --card:#ffffff;
+        --text:#0f172a;
+        --muted:#64748b;
+        --border:#e2e8f0;
+        --brand:#d71920;
+        --brand-dark:#b40d16;
+        --shadow:0 18px 50px rgba(15,23,42,.10);
+      }
+      body { margin: 0; font-family: Inter, "Segoe UI", Tahoma, Arial, sans-serif; background: var(--bg); color: var(--text); }
       h1,h2,h3 { margin: 0 0 14px 0; color: #0f172a; }
       .muted { color: #64748b; font-size: 13px; }
       .app-shell { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
-      .side-panel { background: linear-gradient(180deg, #0f172a 0%, #111827 100%); color: #dbeafe; padding: 22px 16px; border-right: 1px solid #1f2937; }
-      .brand-block { border-bottom: 1px solid #1f2d46; padding-bottom: 14px; margin-bottom: 16px; }
-      .brand-title { font-weight: 800; font-size: 20px; letter-spacing: .5px; color: #f8fafc; }
-      .brand-subtitle { color: #93c5fd; font-size: 13px; }
-      .side-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .7px; color: #93c5fd; margin-bottom: 10px; }
+      .side-panel { background: rgba(255,255,255,.86); color: var(--text); padding: 16px 14px; border-right: 1px solid var(--border); backdrop-filter: blur(8px); }
+      .sidebar-logo{
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding: 14px 10px 18px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid rgba(226,232,240,.9);
+      }
+      .sidebar-logo img{
+        width: min(160px, 100%);
+        max-height: 70px;
+        object-fit: contain;
+        display:block;
+      }
+      .sidebar-logo-avatar{
+        width: 64px;
+        height: 64px;
+        border-radius: 999px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-weight: 900;
+        letter-spacing: .06em;
+        color: #0f172a;
+        background: linear-gradient(180deg, #ffffff, #f1f5f9);
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 10px 22px rgba(15,23,42,.08);
+      }
       .side-links { display: flex; flex-direction: column; gap: 8px; }
-      .side-link { text-decoration: none; color: #dbeafe; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; font-weight: 600; }
-      .side-link:hover { background: #334155; }
-      .side-link.active { background: #2563eb; border-color: #3b82f6; color: #fff; }
-      .main-panel { padding: 26px; min-width: 0; }
-      .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap: 12px; margin-bottom: 12px; }
+      .side-link { text-decoration: none; color: #0f172a; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; font-weight: 750; font-size: 13px; transition: .15s ease; }
+      .side-link:hover { border-color:#cbd5e1; box-shadow:0 8px 20px rgba(15,23,42,.06); transform: translateY(-1px); }
+      .side-link.active { border-color: rgba(215,25,32,.40); box-shadow:0 0 0 3px rgba(215,25,32,.12) inset; background: #fff; }
+      .main-panel { padding: 18px; min-width: 0; }
+      .topbar {
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap: 12px;
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,.86);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow: 0 10px 26px rgba(15,23,42,.06);
+        backdrop-filter: blur(8px);
+      }
       .topbar-spacer { flex: 1; min-width: 0; }
       .menu-burger {
         display: none;
@@ -1775,19 +2014,22 @@ function renderLayout(title, content) {
       .nav-drawer-backdrop.open { display: block; }
       body.nav-drawer-lock { overflow: hidden; }
       .topbar-actions { display:flex; gap: 10px; align-items: center; flex-shrink: 0; }
-      .content-card { background: #fff; border: 1px solid #dbe3ee; border-radius: 14px; box-shadow: 0 8px 24px rgba(15, 23, 42, .06); padding: 20px; }
-      .container { max-width: 900px; margin: 40px auto; background: #fff; border: 1px solid #dbe3ee; border-radius: 14px; padding: 24px; }
+      .topbar-actions form{margin:0}
+      .content-card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); padding: 18px; }
+      .empty-box{padding:20px;text-align:center;border:1px dashed #cbd5e1;border-radius:14px;color:#64748b;background:#fff}
+      .container { max-width: 900px; margin: 32px auto; background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 22px; box-shadow: var(--shadow); }
       .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 18px 0; }
-      .card { background: linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%); border: 1px solid #dbeafe; border-radius: 10px; padding: 14px; }
-      .card strong { font-size: 28px; color: #1d4ed8; display: block; margin-top: 6px; }
+      .card { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 14px; box-shadow: 0 8px 24px rgba(15,23,42,.06); }
+      .card strong { font-size: 26px; color: #0f172a; display: block; margin-top: 6px; letter-spacing:-.02em; }
       .form-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 0; }
-      input, select, textarea, button { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #c7d0db; box-sizing: border-box; }
-      input:focus, select:focus, textarea:focus { border-color: #3b82f6; outline: 2px solid #bfdbfe; }
-      button { background: #16a34a; color: #fff; border: none; cursor: pointer; font-weight: 700; }
-      button:hover { background: #15803d; }
-      .danger-button { width: auto; background: #dc2626; padding: 10px 14px; }
-      .danger-button:hover { background: #b91c1c; }
-      .btn-compact { width: auto; display: inline-block; padding: 8px 12px; font-size: 12px; border-radius: 7px; }
+      input, select, textarea { width: 100%; padding: 12px 12px; border-radius: 12px; border: 1px solid #cbd5e1; box-sizing: border-box; min-height: 46px; background:#fff; }
+      textarea{min-height:92px}
+      input:focus, select:focus, textarea:focus { border-color: rgba(215,25,32,.55); outline: 3px solid rgba(215,25,32,.14); }
+      button { width: 100%; min-height: 46px; padding: 11px 14px; border-radius: 12px; border: none; background: var(--brand); color: #fff; cursor: pointer; font-weight: 850; }
+      button:hover { background: var(--brand-dark); }
+      .danger-button { width: auto; min-height: 42px; background: #fff; color: var(--brand); border:1px solid rgba(215,25,32,.28); padding: 10px 12px; border-radius: 12px; box-shadow: 0 10px 22px rgba(15,23,42,.08); font-weight:900; }
+      .danger-button:hover { border-color: rgba(215,25,32,.42); transform: translateY(-1px); }
+      .btn-compact { width: auto; display: inline-flex; align-items:center; justify-content:center; padding: 8px 12px; font-size: 12px; border-radius: 10px; min-height: 36px; }
       .action-cell { vertical-align: top; text-align: right; min-width: 200px; }
       .approval-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end; }
       .approval-actions form { margin: 0; display: inline-flex; width: auto; }
@@ -1802,26 +2044,28 @@ function renderLayout(title, content) {
       .reject-inline { margin-top: 10px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fef2f2; display: flex; flex-direction: column; gap: 8px; }
       .reject-inline textarea { min-height: 76px; width: 100%; }
       .action-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
-      .module-launcher-wrap { position: relative; z-index: 100; }
-      .module-launcher-button { width: auto; background: #0f172a; padding: 8px 14px; font-size: 13px; border-radius: 8px; }
-      .module-launcher-button:hover { background: #1e293b; }
-      .module-panel-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); z-index: 95; backdrop-filter: blur(2px); }
-      .module-panel-backdrop.open { display: block; }
+      .module-launcher-wrap { position: relative; z-index: 1; }
+      .module-launcher-button { width: auto; min-height:42px; background: #fff; color: #0f172a; border:1px solid #e2e8f0; padding: 10px 12px; font-size: 13px; border-radius: 12px; font-weight:850; box-shadow:0 10px 22px rgba(15,23,42,.08); }
+      .module-launcher-button:hover { border-color:#cbd5e1; transform: translateY(-1px); }
+      .module-panel-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55); z-index: 400; backdrop-filter: blur(4px); pointer-events:none; }
+      .module-panel-backdrop.open { display: block; pointer-events:auto; }
       .module-panel {
         display: none;
         position: fixed;
-        z-index: 100;
+        z-index: 410;
         left: 50%;
         top: 50%;
         transform: translate(-50%, -50%);
-        width: min(440px, calc(100vw - 24px));
+        width: min(560px, calc(100vw - 24px));
         max-height: min(420px, 72vh);
         overflow: hidden;
         flex-direction: column;
-        background: #0f172a;
-        border: 1px solid #334155;
-        border-radius: 14px;
-        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+        background: rgba(255,255,255,.92);
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        box-shadow: 0 28px 70px rgba(15, 23, 42, 0.24);
+        backdrop-filter: blur(10px);
+        pointer-events: auto;
       }
       .module-panel.open { display: flex; }
       .module-panel-header {
@@ -1829,8 +2073,8 @@ function renderLayout(title, content) {
         align-items: center;
         justify-content: space-between;
         padding: 10px 12px 8px;
-        border-bottom: 1px solid #1e293b;
-        color: #e2e8f0;
+        border-bottom: 1px solid rgba(226,232,240,.9);
+        color: #0f172a;
         font-size: 13px;
         font-weight: 700;
         letter-spacing: 0.02em;
@@ -1842,17 +2086,17 @@ function renderLayout(title, content) {
         line-height: 1;
         font-size: 22px;
         border-radius: 8px;
-        background: #1e293b;
-        color: #f1f5f9;
+        background: #f1f5f9;
+        color: #0f172a;
         border: none;
         cursor: pointer;
       }
-      .module-panel-close:hover { background: #334155; }
+      .module-panel-close:hover { background: #e2e8f0; }
       .module-panel-grid {
         display: grid;
         grid-template-columns: repeat(2, 1fr);
-        gap: 8px;
-        padding: 10px;
+        gap: 10px;
+        padding: 12px;
         overflow-y: auto;
         -webkit-overflow-scrolling: touch;
       }
@@ -1860,33 +2104,184 @@ function renderLayout(title, content) {
       body.module-panel-scroll-lock { overflow: hidden; }
       .launcher-card--compact {
         text-decoration: none;
-        background: #1e293b;
-        color: #f8fafc;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 10px 10px;
+        background: #fff;
+        color: #0f172a;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 12px 12px;
         display: flex;
         flex-direction: column;
         gap: 4px;
         min-height: 0;
+        transition: .2s ease transform, .2s ease background, .2s ease border-color;
       }
-      .launcher-card--compact:hover { background: #334155; border-color: #475569; }
-      .launcher-card--compact.active { border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8 inset; background: #1e3a5f; }
-      .launcher-card-title { font-weight: 700; font-size: 13px; line-height: 1.25; color: #f8fafc; }
-      .launcher-card-sub { font-size: 11px; line-height: 1.3; color: #94a3b8; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .launcher-card--compact:hover { border-color: #cbd5e1; box-shadow:0 12px 28px rgba(15,23,42,.10); transform: translateY(-1px); }
+      .launcher-card--compact.active { border-color: rgba(215,25,32,.45); box-shadow:0 0 0 3px rgba(215,25,32,.12) inset; }
+      .launcher-card-title { font-weight: 850; font-size: 13px; line-height: 1.25; color: #0f172a; }
+      .launcher-card-sub { font-size: 11px; line-height: 1.3; color: #64748b; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
       @media (min-width: 520px) {
         .module-panel-grid { grid-template-columns: repeat(3, 1fr); }
       }
       @media (max-width: 380px) {
         .module-panel-grid { grid-template-columns: 1fr; }
       }
-      table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-      th { background: #f8fafc; color: #334155; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
-      th, td { border-bottom: 1px solid #e5e7eb; text-align: left; padding: 11px; font-size: 14px; }
-      .badge { display:inline-block; padding: 4px 8px; border-radius: 999px; background: #dbeafe; color: #1e40af; font-size: 12px; font-weight: 700; }
-      .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
-      .login-box { max-width: 450px; width: 100%; background: #fff; border-radius: 14px; box-shadow: 0 16px 38px rgba(15, 23, 42, .14); padding: 24px; border: 1px solid #e2e8f0; }
-      .login-title { font-size: 28px; margin-bottom: 5px; }
+      table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 14px; border:1px solid var(--border); border-radius: 14px; overflow:hidden; background:#fff; }
+      th { background: #f8fafc; color: #334155; font-weight: 900; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+      th, td { border-bottom: 1px solid #eef2f7; text-align: left; padding: 11px 12px; font-size: 14px; }
+      tr:last-child td{border-bottom:none}
+      .badge { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding: 4px 10px; border-radius: 999px; background: #f8fafc; color: #0f172a; font-size: 12px; font-weight: 900; border:1px solid #e2e8f0; }
+      .badge.ok{background:#ecfdf5;border-color:#bbf7d0;color:#065f46}
+      .badge.warn{background:#fffbeb;border-color:#fde68a;color:#92400e}
+      .badge.err{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+      .login-wrap{
+        min-height:100vh;
+        padding:24px;
+        background:
+          radial-gradient(900px 520px at 14% 18%, rgba(59,130,246,.18), transparent 55%),
+          radial-gradient(820px 480px at 78% 20%, rgba(217,25,32,.14), transparent 55%),
+          linear-gradient(180deg,#f8fafc 0%,#eef2f7 65%,#eaeef6 100%);
+      }
+      .auth-shell{
+        max-width:1100px;
+        margin:0 auto;
+        min-height:calc(100vh - 48px);
+        display:grid;
+        grid-template-columns:1.12fr .88fr;
+        gap:24px;
+        align-items:stretch;
+      }
+      .auth-left{
+        background:rgba(255,255,255,.72);
+        border:1px solid rgba(226,232,240,.9);
+        border-radius:22px;
+        padding:34px 32px;
+        box-shadow:0 14px 44px rgba(15,23,42,.08);
+        backdrop-filter: blur(8px);
+        display:flex;
+        flex-direction:column;
+        justify-content:center;
+      }
+      .auth-brand{
+        display:flex;
+        align-items:center;
+        gap:10px;
+        margin-bottom:16px;
+      }
+      .auth-dot{
+        width:12px;height:12px;border-radius:999px;background:#2563eb;
+        box-shadow:0 0 0 6px rgba(37,99,235,.12);
+      }
+      .auth-brand h1{
+        margin:0;
+        font-size:44px;
+        letter-spacing:-.04em;
+        line-height:1.05;
+        color:#0f172a;
+      }
+      .auth-left p{
+        margin:0;
+        color:#475569;
+        font-size:15px;
+        line-height:1.55;
+        max-width:44ch;
+      }
+      .auth-bullets{
+        margin:18px 0 0;
+        padding:0;
+        list-style:none;
+        display:flex;
+        flex-direction:column;
+        gap:10px;
+        max-width:52ch;
+      }
+      .auth-bullets li{
+        display:flex;
+        gap:10px;
+        align-items:flex-start;
+        color:#0f172a;
+        font-weight:650;
+      }
+      .auth-bullets li span{
+        display:inline-flex;
+        width:24px;height:24px;
+        border-radius:8px;
+        align-items:center;
+        justify-content:center;
+        background:#eff6ff;
+        border:1px solid #dbeafe;
+        color:#1d4ed8;
+        flex:0 0 auto;
+        margin-top:1px;
+        font-size:14px;
+      }
+      .auth-right{
+        display:flex;
+        align-items:center;
+        justify-content:center;
+      }
+      .login-box{
+        width:100%;
+        max-width:420px;
+        background:#fff;
+        border-radius:22px;
+        border:1px solid #e2e8f0;
+        padding:26px 24px;
+        box-shadow:0 18px 50px rgba(15,23,42,.12);
+      }
+      .login-title{font-size:22px;margin:0 0 6px;letter-spacing:-.02em}
+      .login-subtitle{margin:0 0 16px;color:#64748b}
+      .login-label{display:block;font-size:12px;color:#475569;font-weight:800;margin:12px 0 6px;text-transform:uppercase;letter-spacing:.06em}
+      .login-box input,.login-box select{
+        min-height:52px;
+        border-radius:14px;
+        border:1px solid #d1d9e6;
+        background:#fff;
+        padding:12px 14px;
+        font-size:14px;
+      }
+      .login-box input::placeholder{color:#9aa4b2}
+      .login-box input:focus,.login-box select:focus{
+        border-color:#2563eb;
+        outline:3px solid rgba(37,99,235,.18);
+      }
+      .password-wrap{position:relative}
+      .password-wrap input{padding-right:88px}
+      .password-toggle{
+        position:absolute;
+        top:50%;
+        right:10px;
+        transform:translateY(-50%);
+        width:auto;
+        padding:8px 10px;
+        border-radius:12px;
+        border:1px solid #d1d9e6;
+        background:#f8fafc;
+        color:#334155;
+        font-size:12px;
+        font-weight:800;
+        cursor:pointer;
+      }
+      .password-toggle:hover{background:#eef2f7}
+      .login-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}
+      .login-check{display:flex;align-items:center;gap:8px;font-size:13px;color:#475569}
+      .login-check input{width:auto;margin:0}
+      .login-link{color:#2563eb;font-size:13px;text-decoration:none;font-weight:700}
+      .login-link:hover{text-decoration:underline}
+      .login-submit{margin-top:14px}
+      .login-submit button{
+        min-height:52px;
+        border-radius:14px;
+        width:100%;
+        background:linear-gradient(180deg,#d71920,#b40d16);
+        box-shadow:0 10px 22px rgba(217,25,32,.22);
+      }
+      .login-submit button:hover{filter:brightness(.98)}
+      @media (max-width:900px){
+        .auth-shell{grid-template-columns:1fr}
+        .auth-left{display:none}
+        .login-box{max-width:520px}
+        .login-wrap{padding:18px}
+      }
       .error { color: #b91c1c; margin-bottom: 10px; }
       .ok { color: #166534; margin-bottom: 10px; }
       @media (max-width: 980px) {
@@ -1902,11 +2297,11 @@ function renderLayout(title, content) {
           z-index: 160;
           transform: translateX(-105%);
           transition: transform 0.22s ease;
-          border-right: 1px solid #1f2937;
+          border-right: 1px solid var(--border);
           border-bottom: none;
           overflow-y: auto;
           -webkit-overflow-scrolling: touch;
-          box-shadow: 12px 0 40px rgba(0, 0, 0, 0.25);
+          box-shadow: 12px 0 40px rgba(15, 23, 42, 0.16);
           padding: 18px 14px;
         }
         .side-panel.open { transform: translateX(0); }
@@ -2092,6 +2487,1250 @@ function renderLayout(title, content) {
   </html>`;
 }
 
+function renderPublicLayout(title, body, options = {}) {
+  const metaDescription = escapeHtml(String(options.description || "Catalogo ecommerce de electrodomesticos con stock y precios actualizados."));
+  const canonicalUrl = escapeHtml(String(options.canonical || ""));
+  const ogImage = escapeHtml(String(options.image || ""));
+  const brandTitle = escapeHtml(String(options.brandTitle || "ElectroMarket"));
+  const brandLogo = String(options.brandLogo || "").trim();
+  const homeLink = String(options.homeLink || "/public");
+  const catalogLink = String(options.catalogLink || "/public");
+  const searchAction = escapeHtml(String(options.searchAction || "/public"));
+  const searchQuery = escapeHtml(String(options.searchQuery || ""));
+  const backgroundImage = String(options.backgroundImage || "").trim();
+  const breadcrumbHtml = String(options.breadcrumbHtml || "");
+  const scopedNav = options.scopedNav === true;
+  const showDirectoryLink = options.showDirectoryLink !== false;
+  const loginLink = String(options.loginLink || "/login");
+  const sessionUser = options.sessionUser && typeof options.sessionUser === "object" ? options.sessionUser : null;
+  const logoutRedirectTo = String(options.logoutRedirectTo || "");
+  const modulesLink = String(options.modulesLink || "/");
+  const publicCatalogLink = String(options.publicCatalogLink || "");
+  const sessionAllowedModules = Array.isArray(sessionUser?.allowedModules) ? sessionUser.allowedModules : [];
+  const launcherGroups = sessionUser ? getVisibleModuleGroups(sessionAllowedModules) : [];
+  const moduleCardsHtml = sessionUser
+    ? [
+        ...launcherGroups.map(
+          (group) => `<a class="public-launcher-card" href="${escapeHtml(group.path)}">
+            <span class="public-launcher-title">${escapeHtml(group.label)}</span>
+            <span class="public-launcher-sub">${escapeHtml(group.subtitle)}</span>
+          </a>`
+        ),
+        publicCatalogLink
+          ? `<a class="public-launcher-card" href="${escapeHtml(publicCatalogLink)}">
+              <span class="public-launcher-title">Catalogo publico</span>
+              <span class="public-launcher-sub">Volver al catalogo de tu empresa</span>
+            </a>`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("")
+    : "";
+  const bodyBackground = backgroundImage
+    ? `linear-gradient(rgba(245,246,248,.92),rgba(245,246,248,.92)),url('${escapeHtml(backgroundImage)}') center top / cover fixed`
+    : "var(--bg)";
+  return `<!doctype html>
+  <html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    <meta name="description" content="${metaDescription}" />
+    ${canonicalUrl ? `<link rel="canonical" href="${canonicalUrl}" />` : ""}
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="${escapeHtml(title)}" />
+    <meta property="og:description" content="${metaDescription}" />
+    ${canonicalUrl ? `<meta property="og:url" content="${canonicalUrl}" />` : ""}
+    ${ogImage ? `<meta property="og:image" content="${ogImage}" />` : ""}
+    <style>
+      :root{
+        --bg:#f3f5f8;
+        --card:#ffffff;
+        --text:#111827;
+        --muted:#6b7280;
+        --border:#e5e7eb;
+        --brand:#d71920;
+        --brand-dark:#b40d16;
+        --ink:#111827;
+        --ok:#15803d;
+        --fs-hero:clamp(1.35rem,2.4vw,1.95rem);
+        --fs-section:clamp(1.1rem,1.8vw,1.45rem);
+        --fs-price:clamp(1.15rem,2.1vw,1.75rem);
+        --fs-body:clamp(.88rem,1.2vw,.95rem);
+        --space-1:8px;
+        --space-2:12px;
+        --space-3:16px;
+        --space-4:20px;
+      }
+      *{box-sizing:border-box}
+      *:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
+      body{margin:0;font-family:Inter,"Segoe UI",Tahoma,Arial,sans-serif;background:${bodyBackground};color:var(--text)}
+      body.module-panel-scroll-lock{overflow:hidden}
+      .public-header{position:sticky;top:0;z-index:200;box-shadow:0 4px 14px rgba(17,24,39,.08)}
+      .public-mainbar{background:#fff;border-bottom:1px solid #e5e7eb}
+      .public-mainbar-wrap{max-width:1240px;margin:0 auto;padding:12px 20px;display:grid;grid-template-columns:auto minmax(260px,1fr) auto;gap:14px;align-items:center}
+      .public-brand{display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:#111827;font-weight:800;font-size:29px;line-height:1}
+      .public-brand-dot{width:9px;height:9px;border-radius:999px;background:#ffcc00;display:inline-block}
+      .public-brand img{height:44px;max-width:220px;object-fit:contain}
+      .public-search{display:flex;align-items:center;background:#fff;border-radius:12px;padding:4px 6px 4px 14px;border:1px solid #d1d5db}
+      .public-search input{width:100%;border:none;outline:none;font-size:14px;background:transparent}
+      .public-search button{border:none;background:var(--brand);color:#fff;padding:8px 12px;border-radius:10px;font-weight:700;cursor:pointer}
+      .public-search button:hover{background:var(--brand-dark)}
+      .public-header-actions{display:flex;align-items:center;gap:8px}
+      .public-pill{display:inline-flex;align-items:center;gap:6px;padding:9px 12px;border-radius:10px;text-decoration:none;font-weight:700;font-size:13px;border:1px solid transparent}
+      .public-pill-muted{background:#f9fafb;color:#374151;border-color:#d1d5db}
+      .public-pill-login{background:var(--brand);color:#fff}
+      .breadcrumbs{margin:0 auto;max-width:1240px;padding:12px 20px 0;color:#6b7280;font-size:12px}
+      .breadcrumbs a{color:#374151;text-decoration:none}
+      .breadcrumbs-sep{margin:0 6px;color:#9ca3af}
+      .hero{padding:10px 20px 0}
+      .hero-wrap{max-width:1240px;margin:0 auto}
+      .hero-main{border-radius:14px;background:#fff;padding:16px 18px;border:1px solid var(--border)}
+      .hero h1{margin:0 0 6px;font-size:var(--fs-hero);line-height:1.18;letter-spacing:-.02em;color:#111827}
+      .hero p{margin:0;color:#4b5563;max-width:760px;font-size:var(--fs-body)}
+      .hero-side{border-radius:18px;background:#fff;padding:16px;border:1px solid #e8ebf1;display:flex;flex-direction:column;gap:10px}
+      .hero-logo{max-height:120px;max-width:100%;object-fit:contain;background:#f8f9fc;border-radius:10px;border:1px solid #e6e8ef;padding:10px}
+      .hero-badges{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}
+      .hero-badges span{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700}
+      .container{max-width:1240px;margin:0 auto;padding:18px}
+      .section-title{margin:0 0 10px;font-size:var(--fs-section);letter-spacing:-.02em}
+      .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;box-shadow:0 6px 16px rgba(17,24,39,.045)}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+      .metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+      .metric{border:1px solid #dde4f3;border-radius:12px;padding:12px 14px;background:linear-gradient(180deg,#f9fbff 0%,#f1f5ff 100%)}
+      .metric strong{display:block;font-size:24px;margin-top:4px;letter-spacing:-.02em;color:#1d4ed8}
+      .company-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+      .company-card{background:#fff;border:1px solid var(--border);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:10px}
+      .company-card img{width:100%;height:130px;object-fit:contain;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0}
+      .catalog-layout{display:grid;grid-template-columns:260px minmax(0,1fr);gap:14px;align-items:start}
+      .catalog-sidebar{position:sticky;top:76px;padding:14px}
+      .filter-group{padding-top:10px;margin-top:10px;border-top:1px solid #edf0f4}
+      .filter-group:first-of-type{border-top:none;margin-top:0;padding-top:0}
+      .filter-group h4{margin:0 0 8px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280}
+      .results-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;background:#fff;border:1px solid var(--border);border-radius:12px;padding:9px 11px;margin-bottom:10px}
+      .results-info{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+      .filter-summary{display:flex;gap:8px;flex-wrap:wrap}
+      .filter-tag{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid #dbe1ea;background:#f8fafc;color:#334155;font-size:12px;text-decoration:none}
+      .product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:12px}
+      .product-card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(15,23,42,.06);transition:.2s ease transform,.2s ease box-shadow}
+      .product-card:hover{transform:translateY(-2px);box-shadow:0 12px 24px rgba(15,23,42,.12)}
+      .product-media{position:relative;background:#f8fafc}
+      .product-card img{width:100%;height:238px;object-fit:cover;aspect-ratio:4/5}
+      .badge{position:absolute;left:10px;top:10px;padding:4px 8px;border-radius:6px;background:#dc2626;color:#fff;font-size:11px;font-weight:800}
+      .product-card .pbody{padding:11px 11px 12px;display:flex;flex-direction:column;min-height:172px}
+      .product-title{font-size:.9rem;font-weight:700;line-height:1.34;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:37px}
+      .product-meta{margin-top:4px;font-size:12px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+      .muted{color:var(--muted);font-size:.82rem;line-height:1.45}
+      .price-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}
+      .price{font-size:var(--fs-price);font-weight:900;line-height:1;letter-spacing:-.03em;color:#0f172a}
+      .stock-chip{display:inline-block;padding:3px 7px;border-radius:6px;background:#ecfdf5;color:#166534;font-size:11px;font-weight:700}
+      .product-actions{margin-top:auto;padding-top:9px;display:flex;gap:7px}
+      .product-actions a{flex:1;text-align:center;text-decoration:none;padding:8px 9px;border-radius:8px;font-weight:700;font-size:11.5px}
+      .product-actions .ghost{border:1px solid #d0d7e4;color:#374151;background:#fff}
+      .product-actions .solid{background:var(--brand);color:#fff}
+      .product-actions .solid:hover{background:var(--brand-dark)}
+      .product-actions .ghost:hover{border-color:#9ca3af}
+      .card-tools{position:absolute;top:10px;right:10px;display:flex;gap:6px}
+      .icon-btn{width:28px;height:28px;border-radius:999px;border:1px solid #d1d5db;background:#fff;color:#334155;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;font-size:13px;transition:.18s ease}
+      .icon-btn:hover{transform:translateY(-1px);border-color:#9ca3af}
+      .icon-btn.active{color:#be123c;border-color:#fecdd3;background:#fff1f2}
+      input,select{width:100%;padding:9px 10px;border-radius:9px;border:1px solid #c7d0db;font-size:.87rem}
+      input:focus,select:focus{outline:2px solid #fecaca;border-color:#ef4444}
+      button,.btn{display:inline-block;width:auto;padding:10px 14px;border-radius:10px;border:none;background:var(--ok);color:#fff;font-weight:700;text-decoration:none;cursor:pointer}
+      .btn-secondary{background:#111827;color:#fff}
+      .catalog-sidebar form button[type="submit"],
+      .catalog-sidebar form a.btn,
+      .modal-card form button[type="submit"],
+      .modal-card form a.btn{
+        width:100%;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        text-align:center;
+        padding:10px 14px;
+        min-height:40px;
+        border-radius:10px;
+        box-sizing:border-box;
+      }
+      .empty-box{padding:24px;text-align:center;border:1px dashed #cbd5e1;border-radius:12px;color:#64748b;background:#f8fafc}
+      .pager{margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+      .section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+      .section-head .link{color:#1d4ed8;text-decoration:none;font-weight:700;font-size:13px}
+      .promo-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin:0 0 14px}
+      .promo-item{background:#111827;color:#fff;border-radius:10px;padding:10px 12px}
+      .promo-item strong{display:block;font-size:14px}
+      .promo-item span{display:block;font-size:12px;color:#cbd5e1;margin-top:4px}
+      .top-nav{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+      .top-nav a{color:#374151;text-decoration:none;font-weight:700;border:1px solid #d1d5db;padding:6px 10px;border-radius:8px;background:#fff}
+      .carousel{position:relative;border-radius:16px;overflow:hidden;margin:0 0 16px;background:#0f172a}
+      .carousel-track{display:flex;transition:transform .45s ease}
+      .carousel-slide{min-width:100%;position:relative}
+      .carousel-slide img{width:100%;height:280px;object-fit:cover;display:block;opacity:.9}
+      .carousel-caption{position:absolute;left:18px;bottom:18px;right:18px;color:#fff}
+      .carousel-caption strong{display:block;font-size:24px;text-shadow:0 2px 12px rgba(0,0,0,.45)}
+      .carousel-caption span{display:block;font-size:13px;color:#dbeafe;margin-top:4px}
+      .carousel-nav{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border:none;border-radius:999px;background:rgba(0,0,0,.48);color:#fff;cursor:pointer}
+      .carousel-nav.prev{left:10px}
+      .carousel-nav.next{right:10px}
+      .carousel-dots{position:absolute;left:0;right:0;bottom:10px;display:flex;justify-content:center;gap:8px}
+      .carousel-dots button{width:9px;height:9px;border:none;border-radius:999px;background:rgba(255,255,255,.45);padding:0;cursor:pointer}
+      .carousel-dots button.active{background:#fff}
+      .floating-contact{position:fixed;right:12px;bottom:12px;z-index:210;display:flex;flex-direction:column;gap:6px}
+      .floating-contact a{display:inline-block;padding:8px 10px;border-radius:8px;text-decoration:none;font-size:11px;font-weight:700;box-shadow:0 4px 12px rgba(0,0,0,.18);opacity:.92}
+      .floating-contact .wa{background:#22c55e;color:#052e16}
+      .floating-contact .call{background:#1e3a8a;color:#fff}
+      .public-module-backdrop{display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:430;backdrop-filter:blur(4px)}
+      .public-module-backdrop.open{display:block}
+      .public-module-modal{display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:440;width:min(560px,calc(100vw - 24px));max-height:min(420px,72vh);overflow:hidden;flex-direction:column;background:rgba(255,255,255,.94);border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 28px 70px rgba(15,23,42,.24);backdrop-filter:blur(10px)}
+      .public-module-modal.open{display:flex}
+      .public-module-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px 8px;border-bottom:1px solid rgba(226,232,240,.9);color:#0f172a;font-size:13px;font-weight:700}
+      .public-module-close{width:32px;height:32px;padding:0;line-height:1;font-size:22px;border-radius:8px;background:#f1f5f9;color:#0f172a;border:none;cursor:pointer}
+      .public-module-close:hover{background:#e2e8f0}
+      .public-module-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:12px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+      .public-launcher-card{text-decoration:none;background:#fff;color:#0f172a;border:1px solid #e2e8f0;border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:4px;transition:.2s ease}
+      .public-launcher-card:hover{border-color:#cbd5e1;box-shadow:0 12px 28px rgba(15,23,42,.10);transform:translateY(-1px)}
+      .public-launcher-title{font-weight:850;font-size:13px;line-height:1.25;color:#0f172a}
+      .public-launcher-sub{font-size:11px;line-height:1.3;color:#64748b;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+      .compare-bar{position:sticky;bottom:10px;z-index:140;background:#0f172a;color:#fff;border-radius:12px;padding:10px 12px;display:none;align-items:center;justify-content:space-between;gap:8px;margin-top:12px}
+      .compare-list{display:flex;gap:6px;flex-wrap:wrap}
+      .compare-pill{background:#1f2937;border:1px solid #334155;color:#dbeafe;border-radius:999px;padding:4px 9px;font-size:11px}
+      .wish{color:#be123c;font-weight:800;font-size:12px}
+      .old-price{font-size:12px;color:#6b7280}
+      .compare-table{width:100%;border-collapse:collapse}
+      .compare-table th,.compare-table td{border:1px solid #dbe1ec;padding:8px;text-align:left;font-size:13px}
+      .mobile-filter{display:none;margin-bottom:10px}
+      .modal-overlay{display:none;position:fixed;inset:0;background:rgba(2,6,23,.58);z-index:260;padding:16px;overflow:auto}
+      .modal-card{background:#fff;border-radius:14px;border:1px solid #dbe3ee;max-width:920px;margin:14px auto;padding:14px}
+      @media (max-width:980px){
+        .public-mainbar-wrap{grid-template-columns:1fr;gap:8px}
+        .hero-main{padding:16px}
+        .hero h1{font-size:23px}
+        .catalog-layout{grid-template-columns:1fr}
+        .catalog-sidebar{position:static;display:none}
+        .mobile-filter{display:block}
+        .product-grid{grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+        .product-card img{height:220px}
+        .product-card .pbody{min-height:166px}
+        .carousel-slide img{height:220px}
+      }
+      @media (min-width:520px){
+        .public-module-grid{grid-template-columns:repeat(3,1fr)}
+      }
+      @media (max-width:380px){
+        .public-module-grid{grid-template-columns:1fr}
+      }
+      @media (max-width:720px){
+        .public-mainbar-wrap,.container{padding-left:14px;padding-right:14px}
+        .public-brand{font-size:24px}
+        .hero{padding-top:8px}
+        .hero-main{padding:14px}
+        .results-bar{padding:8px 9px}
+        .product-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+        .product-card img{height:188px}
+        .product-card .pbody{padding:10px;min-height:158px}
+        .price{font-size:1.15rem}
+        .product-actions a{padding:7px 8px}
+      }
+      @media (max-width:520px){
+        .product-grid{grid-template-columns:1fr 1fr}
+        .product-card img{height:172px}
+        .icon-btn{width:26px;height:26px}
+      }
+    </style>
+  </head>
+  <body>
+    <header class="public-header">
+      <div class="public-mainbar">
+        <div class="public-mainbar-wrap">
+          <a href="${escapeHtml(homeLink)}" class="public-brand">${
+            brandLogo
+              ? `<img src="${escapeHtml(brandLogo)}" alt="${brandTitle}" />`
+              : `<span class="public-brand-dot"></span>${brandTitle}`
+          }</a>
+          <form class="public-search" method="get" action="${searchAction}">
+            <input type="search" name="q" value="${searchQuery}" placeholder="Que producto estas buscando?" />
+            <button type="submit">Buscar</button>
+          </form>
+          <div class="public-header-actions">
+            ${
+              showDirectoryLink
+                ? `<a class="public-pill public-pill-muted" href="/public">Empresas</a>`
+                : ""
+            }
+            ${
+              sessionUser
+                ? `<button type="button" class="public-pill public-pill-muted" id="publicModuleLauncherBtn" style="cursor:pointer">Modulos</button>
+                   <form method="post" action="/logout" style="margin:0;display:inline-flex">
+                     <input type="hidden" name="redirectTo" value="${escapeHtml(logoutRedirectTo)}" />
+                     <button type="submit" class="public-pill public-pill-login" style="border:none;cursor:pointer">Salir</button>
+                   </form>`
+                : `<a class="public-pill public-pill-login" href="${escapeHtml(loginLink)}">Iniciar sesion</a>`
+            }
+          </div>
+        </div>
+      </div>
+    </header>
+    ${breadcrumbHtml}
+    ${body}
+    ${
+      sessionUser
+        ? `<div id="public-module-backdrop" class="public-module-backdrop" aria-hidden="true"></div>
+           <div id="public-module-modal" class="public-module-modal" role="dialog" aria-modal="true" aria-labelledby="publicModuleTitle">
+             <div class="public-module-head">
+               <span id="publicModuleTitle">Ir a modulo</span>
+               <button type="button" class="public-module-close" id="publicModuleCloseBtn" aria-label="Cerrar">&times;</button>
+             </div>
+             <div class="public-module-grid">
+               ${moduleCardsHtml || "<p class='muted'>No tienes modulos habilitados.</p>"}
+             </div>
+           </div>`
+        : ""
+    }
+    <script>
+      (function(){
+        const all = document.querySelectorAll("[data-carousel]");
+        all.forEach(function(carousel){
+          const track = carousel.querySelector(".carousel-track");
+          const slides = carousel.querySelectorAll(".carousel-slide");
+          if(!track || slides.length < 2) return;
+          const dots = carousel.querySelectorAll(".carousel-dots button");
+          let idx = 0;
+          function go(next){
+            idx = (next + slides.length) % slides.length;
+            track.style.transform = "translateX(-" + (idx * 100) + "%)";
+            dots.forEach(function(d, i){ d.classList.toggle("active", i === idx); });
+          }
+          const prev = carousel.querySelector(".carousel-nav.prev");
+          const next = carousel.querySelector(".carousel-nav.next");
+          if (prev) prev.addEventListener("click", function(){ go(idx - 1); });
+          if (next) next.addEventListener("click", function(){ go(idx + 1); });
+          dots.forEach(function(dot, i){ dot.addEventListener("click", function(){ go(i); }); });
+          setInterval(function(){ go(idx + 1); }, 4500);
+        });
+      })();
+      (function(){
+        const WKEY = "public-wishlist-v1";
+        const CKEY = "public-compare-v1";
+        const wish = new Set(JSON.parse(localStorage.getItem(WKEY) || "[]"));
+        const compare = JSON.parse(localStorage.getItem(CKEY) || "[]");
+        function save(){
+          localStorage.setItem(WKEY, JSON.stringify(Array.from(wish)));
+          localStorage.setItem(CKEY, JSON.stringify(compare.slice(0,3)));
+        }
+        function render(){
+          document.querySelectorAll("[data-wish]").forEach(function(btn){
+            const id = btn.getAttribute("data-wish");
+            btn.classList.toggle("active", wish.has(id));
+            btn.textContent = wish.has(id) ? "❤" : "♡";
+          });
+          document.querySelectorAll("[data-compare]").forEach(function(btn){
+            const id = btn.getAttribute("data-id");
+            const selected = compare.some(function(x){ return String(x.id) === String(id); });
+            btn.classList.toggle("active", selected);
+            btn.textContent = selected ? "⇄" : "⤢";
+          });
+          const bar = document.querySelector("[data-compare-bar]");
+          const list = document.querySelector("[data-compare-list]");
+          if (!bar || !list) return;
+          list.innerHTML = compare.map(function(p){ return '<span class="compare-pill">' + p.name + "</span>"; }).join("");
+          bar.style.display = compare.length ? "flex" : "none";
+        }
+        document.querySelectorAll("[data-wish]").forEach(function(btn){
+          btn.addEventListener("click", function(e){
+            e.preventDefault();
+            const id = btn.getAttribute("data-wish");
+            if (wish.has(id)) wish.delete(id); else wish.add(id);
+            save(); render();
+          });
+        });
+        document.querySelectorAll("[data-compare]").forEach(function(btn){
+          btn.addEventListener("click", function(e){
+            e.preventDefault();
+            const payload = {
+              id: btn.getAttribute("data-id"),
+              name: btn.getAttribute("data-name"),
+              price: btn.getAttribute("data-price"),
+              brand: btn.getAttribute("data-brand"),
+              model: btn.getAttribute("data-model"),
+              stock: btn.getAttribute("data-stock")
+            };
+            const idx = compare.findIndex(function(x){ return x.id === payload.id; });
+            if (idx >= 0) compare.splice(idx, 1);
+            else if (compare.length < 3) compare.push(payload);
+            else { compare.shift(); compare.push(payload); }
+            save(); render();
+          });
+        });
+        const openBtn = document.querySelector("[data-open-compare]");
+        if (openBtn) {
+          openBtn.addEventListener("click", function(e){
+            e.preventDefault();
+            if (!compare.length) return;
+            const table = '<table class="compare-table"><thead><tr><th>Producto</th><th>Marca</th><th>Modelo</th><th>Precio</th><th>Stock</th></tr></thead><tbody>' +
+              compare.map(function(p){
+                return "<tr><td>" + p.name + "</td><td>" + p.brand + "</td><td>" + p.model + "</td><td>S/ " + Number(p.price || 0).toFixed(2) + "</td><td>" + p.stock + "</td></tr>";
+              }).join("") +
+              "</tbody></table>";
+            const w = window.open("", "_blank", "width=900,height=560");
+            if (!w) return;
+            w.document.write("<html><head><title>Comparador</title><style>body{font-family:Arial;padding:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background:#f3f4f6}</style></head><body><h2>Comparador de productos</h2>" + table + "</body></html>");
+            w.document.close();
+          });
+        }
+        const quickBtns = document.querySelectorAll("[data-quick]");
+        const quickModal = document.querySelector("[data-quick-modal]");
+        const quickBody = document.querySelector("[data-quick-body]");
+        const quickClose = document.querySelector("[data-quick-close]");
+        if (quickModal && quickBody) {
+          quickBtns.forEach(function(btn){
+            btn.addEventListener("click", function(e){
+              e.preventDefault();
+              quickBody.innerHTML =
+                '<div style="display:grid;grid-template-columns:minmax(0,1fr) 1fr;gap:12px">' +
+                '<img src="' + (btn.getAttribute("data-image") || "") + '" style="width:100%;height:260px;object-fit:cover;border-radius:10px;background:#f1f5f9" />' +
+                '<div><h3 style="margin-top:0">' + (btn.getAttribute("data-name") || "-") + '</h3>' +
+                '<p class="muted" style="margin:0 0 8px">' + (btn.getAttribute("data-brand") || "-") + " · " + (btn.getAttribute("data-model") || "-") + '</p>' +
+                '<p class="price" style="margin:0 0 8px">S/ ' + Number(btn.getAttribute("data-price") || 0).toFixed(2) + '</p>' +
+                '<p class="muted">Stock ' + (btn.getAttribute("data-stock") || "0") + "</p>" +
+                '<a class="btn" href="' + (btn.getAttribute("data-link") || "#") + '">Ver detalle</a></div></div>';
+              quickModal.style.display = "block";
+            });
+          });
+          if (quickClose) quickClose.addEventListener("click", function(){ quickModal.style.display = "none"; });
+          quickModal.addEventListener("click", function(e){ if (e.target === quickModal) quickModal.style.display = "none"; });
+        }
+        const mobileFilterOpen = document.querySelector("[data-open-mobile-filter]");
+        const mobileFilterModal = document.querySelector("[data-mobile-filter-modal]");
+        const mobileFilterClose = document.querySelector("[data-close-mobile-filter]");
+        if (mobileFilterOpen && mobileFilterModal) {
+          mobileFilterOpen.addEventListener("click", function(e){ e.preventDefault(); mobileFilterModal.style.display = "block"; });
+          if (mobileFilterClose) mobileFilterClose.addEventListener("click", function(){ mobileFilterModal.style.display = "none"; });
+          mobileFilterModal.addEventListener("click", function(e){ if (e.target === mobileFilterModal) mobileFilterModal.style.display = "none"; });
+        }
+        render();
+      })();
+      (function(){
+        const btn = document.getElementById("publicModuleLauncherBtn");
+        const modal = document.getElementById("public-module-modal");
+        const backdrop = document.getElementById("public-module-backdrop");
+        const closeBtn = document.getElementById("publicModuleCloseBtn");
+        if(!btn || !modal || !backdrop) return;
+        function setOpen(open){
+          modal.classList.toggle("open", open);
+          backdrop.classList.toggle("open", open);
+          document.body.classList.toggle("module-panel-scroll-lock", open);
+          btn.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+        btn.addEventListener("click", function(e){ e.preventDefault(); setOpen(!modal.classList.contains("open")); });
+        if(closeBtn) closeBtn.addEventListener("click", function(){ setOpen(false); });
+        backdrop.addEventListener("click", function(){ setOpen(false); });
+        document.addEventListener("keydown", function(e){ if(e.key === "Escape"){ setOpen(false); } });
+      })();
+    </script>
+  </body>
+  </html>`;
+}
+
+function renderPublicPortalLayout(title, body, options = {}) {
+  const metaDescription = escapeHtml(String(options.description || "Portal de empresas activas con acceso a sus catalogos."));
+  const canonicalUrl = escapeHtml(String(options.canonical || ""));
+  const portalTitle = escapeHtml(String(options.portalTitle || "Empresas"));
+  const searchQuery = escapeHtml(String(options.searchQuery || ""));
+  const searchAction = escapeHtml(String(options.searchAction || "/public"));
+  const showSearch = options.showSearch !== false;
+  return `<!doctype html>
+  <html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    <meta name="description" content="${metaDescription}" />
+    ${canonicalUrl ? `<link rel="canonical" href="${canonicalUrl}" />` : ""}
+    <style>
+      :root{
+        --bg:#f4f6f9;
+        --card:#ffffff;
+        --text:#111827;
+        --muted:#6b7280;
+        --border:#e5e7eb;
+        --brand:#d71920;
+        --brand-dark:#b40d16;
+      }
+      *{box-sizing:border-box}
+      body{margin:0;font-family:Inter,"Segoe UI",Tahoma,Arial,sans-serif;background:var(--bg);color:var(--text)}
+      .portal-header{position:sticky;top:0;z-index:80;background:#fff;border-bottom:1px solid var(--border)}
+      .portal-header-wrap{max-width:1140px;margin:0 auto;padding:12px 18px;display:grid;grid-template-columns:auto minmax(220px,1fr) auto;align-items:center;gap:12px}
+      .portal-brand{font-size:20px;font-weight:800;letter-spacing:-.02em;color:#111827;text-decoration:none}
+      .portal-actions{display:flex;align-items:center;gap:8px;justify-self:end}
+      .btn{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border-radius:9px;padding:8px 12px;font-size:13px;font-weight:700;border:1px solid transparent;cursor:pointer}
+      .btn-login{background:var(--brand);color:#fff}
+      .btn-login:hover{background:var(--brand-dark)}
+      .container{max-width:1140px;margin:0 auto;padding:18px}
+      .portal-search{display:flex;gap:8px;align-items:center}
+      .portal-search input{min-width:260px;max-width:380px;width:100%;padding:9px 10px;border:1px solid #cfd6df;border-radius:9px;font-size:.9rem}
+      .portal-search button{padding:9px 12px;border:none;border-radius:9px;background:#111827;color:#fff;font-weight:700;cursor:pointer}
+      .portal-search button:hover{background:#000}
+      .portal-meta{font-size:12px;color:var(--muted);margin:8px 0 0}
+      .company-grid{margin-top:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:18px}
+      .company-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px;box-shadow:0 2px 8px rgba(15,23,42,.04);transition:.2s ease;min-height:340px}
+      .company-card:hover{transform:translateY(-2px);box-shadow:0 12px 24px rgba(15,23,42,.08)}
+      .company-logo{width:100%;height:144px;object-fit:contain;background:linear-gradient(180deg,#fbfcfe,#f4f7fb);border:1px solid #e8edf4;border-radius:12px;padding:12px}
+      .company-name{margin:0;font-size:1rem;line-height:1.3}
+      .company-copy{display:flex;flex-direction:column;gap:8px;flex:1}
+      .company-desc{
+        margin:0;color:var(--muted);font-size:.84rem;line-height:1.45;
+        display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;text-overflow:ellipsis;
+        min-height:38px
+      }
+      .company-cta{margin-top:auto}
+      .company-cta .btn{width:100%;min-height:38px}
+      .empty-box{padding:24px;border:1px dashed #cbd5e1;border-radius:10px;background:#fff;color:#64748b;text-align:center}
+      .portal-footer{margin-top:20px;border-top:1px solid var(--border);background:#fff}
+      .portal-footer-wrap{max-width:1140px;margin:0 auto;padding:12px 18px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+      .portal-footer span,.portal-footer a{font-size:12px;color:var(--muted);text-decoration:none}
+      @media (max-width:820px){
+        .portal-search input{min-width:200px}
+      }
+      @media (max-width:640px){
+        .container{padding:14px}
+        .portal-header-wrap,.portal-footer-wrap{padding:10px 14px}
+        .portal-header-wrap{grid-template-columns:1fr;gap:10px}
+        .portal-search{width:100%}
+        .portal-actions{justify-self:start}
+        .portal-search input{max-width:none;min-width:0;flex:1}
+        .company-grid{grid-template-columns:1fr}
+      }
+    </style>
+  </head>
+  <body>
+    <header class="portal-header">
+      <div class="portal-header-wrap">
+        <a class="portal-brand" href="/public">${portalTitle}</a>
+        ${
+          showSearch
+            ? `<form class="portal-search" method="get" action="${searchAction}">
+                 <input type="search" name="q" value="${searchQuery}" placeholder="Buscar empresa" />
+                 <button type="submit">Buscar</button>
+               </form>`
+            : `<div></div>`
+        }
+        <div class="portal-actions">
+          <a class="btn btn-login" href="/login">Iniciar sesion</a>
+        </div>
+      </div>
+    </header>
+    <main class="container">
+      <p class="portal-meta">${escapeHtml(String(options.metaText || ""))}</p>
+      ${body}
+    </main>
+    <footer class="portal-footer">
+      <div class="portal-footer-wrap">
+        <span>${portalTitle}</span>
+        <a href="/login">Iniciar sesion</a>
+      </div>
+    </footer>
+  </body>
+  </html>`;
+}
+
+function renderAccessGatePage(title, subtitle, options = {}) {
+  const safeTitle = escapeHtml(String(title || "Acceso"));
+  const safeSubtitle = escapeHtml(String(subtitle || ""));
+  const action = escapeHtml(String(options.action || "/"));
+  const placeholder = escapeHtml(String(options.placeholder || "Clave de acceso"));
+  const buttonText = escapeHtml(String(options.buttonText || "Ingresar"));
+  const errorText = String(options.errorText || "").trim();
+  const restrictedText = String(options.restrictedText || "").trim();
+  const errorHtml = errorText
+    ? `<div class="gate-msg gate-err">${escapeHtml(errorText)}</div>`
+    : "";
+  const restrictedHtml = restrictedText
+    ? `<div class="gate-msg gate-warn">${escapeHtml(restrictedText)}</div>`
+    : "";
+  return `<!doctype html>
+  <html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${safeTitle}</title>
+    <style>
+      :root{
+        --bg1:#eef2ff;
+        --bg2:#f8fafc;
+        --card:#ffffff;
+        --text:#0f172a;
+        --muted:#64748b;
+        --border:#e2e8f0;
+        --brand:#d71920;
+        --brand-dark:#b40d16;
+      }
+      *{box-sizing:border-box}
+      body{
+        margin:0;min-height:100vh;
+        font-family:Inter,"Segoe UI",Tahoma,Arial,sans-serif;
+        color:var(--text);
+        background:
+          radial-gradient(1200px 600px at 20% 10%, rgba(215,25,32,.10), rgba(215,25,32,0) 60%),
+          radial-gradient(900px 520px at 80% 0%, rgba(59,130,246,.10), rgba(59,130,246,0) 60%),
+          linear-gradient(180deg, var(--bg1), var(--bg2));
+        display:flex;align-items:center;justify-content:center;
+        padding:18px;
+      }
+      .gate{
+        width:min(420px, 100%);
+        background:rgba(255,255,255,.92);
+        border:1px solid var(--border);
+        border-radius:22px;
+        box-shadow:0 24px 60px rgba(15,23,42,.14);
+        overflow:hidden;
+        backdrop-filter: blur(8px);
+      }
+      .gate-head{
+        padding:22px 22px 14px;
+        border-bottom:1px solid rgba(226,232,240,.7);
+        background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(255,255,255,.85));
+      }
+      .gate-title{margin:0;font-size:18px;font-weight:900;letter-spacing:-.02em}
+      .gate-sub{margin:6px 0 0;color:var(--muted);font-size:13px;line-height:1.45}
+      .gate-body{padding:18px 22px 22px}
+      .gate-msg{margin:0 0 12px;padding:10px 12px;border-radius:14px;font-size:13px;border:1px solid}
+      .gate-err{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+      .gate-warn{background:#fffbeb;border-color:#fde68a;color:#92400e}
+      .field label{display:block;font-size:12px;font-weight:800;color:#334155;margin-bottom:7px}
+      .field input{
+        width:100%;
+        padding:13px 14px;
+        border-radius:14px;
+        border:1px solid #cbd5e1;
+        background:#fff;
+        font-size:14px;
+        outline:none;
+      }
+      .field input:focus{
+        border-color:rgba(215,25,32,.55);
+        box-shadow:0 0 0 4px rgba(215,25,32,.14);
+      }
+      .actions{margin-top:14px;display:flex;gap:10px}
+      .btn{
+        width:100%;
+        display:inline-flex;align-items:center;justify-content:center;
+        border:none;border-radius:14px;
+        padding:13px 14px;
+        font-size:14px;font-weight:900;
+        cursor:pointer;
+      }
+      .btn-primary{background:var(--brand);color:#fff}
+      .btn-primary:hover{background:var(--brand-dark)}
+    </style>
+  </head>
+  <body>
+    <main class="gate">
+      <header class="gate-head">
+        <h1 class="gate-title">${safeTitle}</h1>
+        <p class="gate-sub">${safeSubtitle}</p>
+      </header>
+      <section class="gate-body">
+        ${restrictedHtml}
+        ${errorHtml}
+        <form method="post" action="${action}">
+          <div class="field">
+            <label>Clave</label>
+            <input type="password" name="password" placeholder="${placeholder}" required />
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" type="submit">${buttonText}</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+  </html>`;
+}
+
+app.get("/public", async (req, res) => {
+  await ensureAllCompanySlugs();
+  const directoryPassword = String(process.env.PUBLIC_DIRECTORY_PASSWORD || "").trim();
+  const unlocked = Boolean(req.session.publicDirectoryUnlocked);
+  const dirError = String(req.query.dirError || "").trim();
+  if (!unlocked) {
+    if (!directoryPassword) {
+      return res.send(
+        renderAccessGatePage("Acceso restringido", "Ingresa la clave privada para continuar", {
+          action: "/public/unlock",
+          restrictedText: "Acceso restringido",
+        })
+      );
+    }
+    return res.send(
+      renderAccessGatePage("Acceso privado", "Ingresa la clave para continuar", {
+        action: "/public/unlock",
+        placeholder: "Clave de acceso",
+        buttonText: "Ingresar",
+        errorText: dirError ? "Clave incorrecta" : "",
+      })
+    );
+  }
+  const qRaw = String(req.query.q || "").trim();
+  const q = qRaw.toLowerCase();
+  const companies = await all(
+    `SELECT id, name, IFNULL(slug,'') AS slug, IFNULL(logo_path,'') AS logo_path,
+      IFNULL(public_title,'') AS public_title, IFNULL(public_description,'') AS public_description
+     FROM companies WHERE status='ACT' AND IFNULL(slug,'')<>'' ORDER BY name;`
+  );
+  const visibleCompanies = q
+    ? companies.filter(
+        (c) =>
+          `${String(c.name || "")} ${String(c.public_title || "")} ${String(c.public_description || "")}`
+            .toLowerCase()
+            .includes(q)
+      )
+    : companies;
+  const companyPlaceholder =
+    "data:image/svg+xml;utf8," +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500">
+        <defs>
+          <linearGradient id="g" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#f8fafc"/>
+            <stop offset="100%" stop-color="#eef2f7"/>
+          </linearGradient>
+        </defs>
+        <rect width="900" height="500" fill="url(#g)"/>
+        <rect x="290" y="120" width="320" height="230" rx="18" fill="#e2e8f0"/>
+        <circle cx="450" cy="205" r="48" fill="#cbd5e1"/>
+        <rect x="340" y="278" width="220" height="16" rx="8" fill="#cbd5e1"/>
+      </svg>`
+    );
+  const cards = visibleCompanies
+    .map(
+      (c) => `<article class="company-card">
+        <img class="company-logo" src="${
+          c.logo_path
+            ? escapeHtml(c.logo_path)
+            : companyPlaceholder
+        }" alt="${escapeHtml(c.name)}" />
+        <div class="company-copy">
+          <h3 class="company-name">${escapeHtml(c.public_title || c.name)}</h3>
+          <p class="company-desc">${escapeHtml(c.public_description || "Empresa activa con catalogo disponible.")}</p>
+        </div>
+        <div class="company-cta"><a class="btn btn-login" href="/public/${encodeURIComponent(c.slug)}/catalog">Ver catalogo</a></div>
+      </article>`
+    )
+    .join("");
+  res.send(
+    renderPublicPortalLayout(
+      "Empresas activas",
+      `${cards ? `<div class="company-grid">${cards}</div>` : `<div class="empty-box">No hay empresas que coincidan con tu busqueda.</div>`}`,
+      {
+        description: "Directorio publico de empresas de electrodomesticos con catalogos propios.",
+        canonical: "/public",
+        portalTitle: "Empresas",
+        searchQuery: qRaw,
+        searchAction: "/public",
+        metaText: `${visibleCompanies.length} empresa(s) encontradas`,
+        showSearch: true,
+      }
+    )
+  );
+});
+
+app.post("/public/unlock", async (req, res) => {
+  const directoryPassword = String(process.env.PUBLIC_DIRECTORY_PASSWORD || "").trim();
+  if (!directoryPassword) return res.redirect("/public");
+  const pass = String(req.body.password || "").trim();
+  if (pass && pass === directoryPassword) {
+    req.session.publicDirectoryUnlocked = true;
+    return res.redirect("/public");
+  }
+  return res.redirect("/public?dirError=1");
+});
+
+app.get("/public/:slug", async (req, res) => {
+  const slug = String(req.params.slug || "").trim();
+  return res.redirect(`/public/${encodeURIComponent(slug)}/catalog`);
+});
+
+app.get("/public/company/:slug", async (req, res) => {
+  await ensureAllCompanySlugs();
+  const slug = String(req.params.slug || "").trim();
+  const company = await get(
+    `SELECT id, name, IFNULL(public_title,'') AS public_title, IFNULL(public_description,'') AS public_description,
+      IFNULL(email,'') AS email, IFNULL(phone,'') AS phone, IFNULL(whatsapp,'') AS whatsapp,
+      IFNULL(address,'') AS address, IFNULL(city,'') AS city, IFNULL(country,'') AS country,
+      IFNULL(latitude,0) AS latitude, IFNULL(longitude,0) AS longitude, IFNULL(website,'') AS website,
+      IFNULL(business_hours,'') AS business_hours, IFNULL(public_features,'') AS public_features
+     FROM companies
+     WHERE status='ACT' AND slug=?;`,
+    [slug]
+  );
+  if (!company) return res.status(404).json({ ok: false, error: "Empresa no encontrada" });
+  return res.json({
+    ok: true,
+    company: {
+      name: company.name,
+      public_title: company.public_title || "",
+      public_description: company.public_description || "",
+      email: company.email || "",
+      phone: company.phone || "",
+      whatsapp: company.whatsapp || "",
+      address: company.address || "",
+      city: company.city || "",
+      country: company.country || "",
+      latitude: company.latitude || null,
+      longitude: company.longitude || null,
+      website: company.website || "",
+      business_hours: company.business_hours || "",
+      public_features: company.public_features || "",
+    },
+  });
+});
+
+app.get("/public/:slug/catalog", async (req, res) => {
+  await ensureAllCompanySlugs();
+  const slug = String(req.params.slug || "").trim();
+  const q = String(req.query.q || "").trim().toLowerCase();
+  const categoryId = Number(req.query.categoryId || 0);
+  const brandId = Number(req.query.brandId || 0);
+  const sort = String(req.query.sort || "name_asc");
+  const page = Math.max(1, Math.floor(Number(req.query.page || 1)));
+  const perPage = 24;
+  const company = await get(
+    `SELECT id, name, IFNULL(logo_path,'') AS logo_path, IFNULL(slug,'') AS slug, IFNULL(public_contact,'') AS public_contact,
+      IFNULL(public_background_path,'') AS public_background_path, IFNULL(public_title,'') AS public_title,
+      IFNULL(public_description,'') AS public_description, IFNULL(email,'') AS email, IFNULL(phone,'') AS phone,
+      IFNULL(whatsapp,'') AS whatsapp, IFNULL(address,'') AS address, IFNULL(city,'') AS city, IFNULL(country,'') AS country,
+      IFNULL(website,'') AS website, IFNULL(business_hours,'') AS business_hours, IFNULL(public_features,'') AS public_features
+     FROM companies WHERE status='ACT' AND slug=?;`,
+    [slug]
+  );
+  if (!company) return res.status(404).send("Empresa no encontrada");
+  if (req.session.user && Number(req.session.user.companyId) !== Number(company.id)) {
+    return res.status(403).send("Acceso no permitido para otra empresa.");
+  }
+  let where = "p.company_id=? AND p.status='ACTIVO' AND IFNULL(p.is_public,1)=1";
+  const params = [company.id];
+  if (q) {
+    where += " AND LOWER(COALESCE(p.name,'') || ' ' || COALESCE(p.sku,'') || ' ' || COALESCE(p.model,'')) LIKE ?";
+    params.push(`%${q.replace(/%/g, "").replace(/_/g, "")}%`);
+  }
+  if (categoryId > 0) {
+    where += " AND p.category_id=?";
+    params.push(categoryId);
+  }
+  if (brandId > 0) {
+    where += " AND p.brand_id=?";
+    params.push(brandId);
+  }
+  let orderBy = "p.name ASC";
+  if (sort === "price_asc") orderBy = "price ASC, p.name ASC";
+  else if (sort === "price_desc") orderBy = "price DESC, p.name ASC";
+  else if (sort === "stock_desc") orderBy = "IFNULL(p.current_stock,0) DESC, p.name ASC";
+  else if (sort === "new_desc") orderBy = "p.id DESC";
+  const totalRow = await get(`SELECT COUNT(*) AS n FROM products p WHERE ${where};`, params);
+  const totalProducts = Number(totalRow?.n || 0);
+  const totalPages = Math.max(1, Math.ceil(totalProducts / perPage));
+  const safePage = Math.min(page, totalPages);
+  const offset = (safePage - 1) * perPage;
+  const products = await all(
+    `SELECT p.id, p.name, p.sku, IFNULL(p.model,'') AS model, IFNULL(p.image_path,'') AS image_path,
+      IFNULL((SELECT pp.price FROM product_prices pp WHERE pp.company_id=p.company_id AND pp.product_id=p.id ORDER BY datetime(pp.effective_date) DESC LIMIT 1),0) AS price,
+      IFNULL((SELECT pp.price FROM product_prices pp WHERE pp.company_id=p.company_id AND pp.product_id=p.id ORDER BY datetime(pp.effective_date) DESC LIMIT 1 OFFSET 1),0) AS previous_price,
+      IFNULL(p.current_stock,0) AS current_stock, IFNULL(p.requires_serial,0) AS requires_serial,
+      IFNULL((SELECT COUNT(1) FROM product_serials ps WHERE ps.company_id=p.company_id AND ps.product_id=p.id AND ps.status='EN_STOCK'),0) AS serial_units,
+      IFNULL((SELECT SUM(il.quantity) FROM inventory_locations il WHERE il.company_id=p.company_id AND il.product_id=p.id),0) AS located_stock,
+      IFNULL(b.name,'') AS brand_name
+     FROM products p
+     LEFT JOIN brands b ON b.id = p.brand_id AND b.company_id = p.company_id
+     WHERE ${where}
+     ORDER BY ${orderBy}
+     LIMIT ? OFFSET ?;`,
+    [...params, perPage, offset]
+  );
+  const categories = await all(
+    "SELECT id, name FROM categories WHERE company_id=? AND status='ACTIVO' ORDER BY name;",
+    [company.id]
+  );
+  const brands = await all(
+    "SELECT id, name FROM brands WHERE company_id=? AND status='ACTIVO' ORDER BY name;",
+    [company.id]
+  );
+  const topCategories = await all(
+    `SELECT c.id, c.name, COUNT(1) AS n
+     FROM products p
+     INNER JOIN categories c ON c.id=p.category_id AND c.company_id=p.company_id
+     WHERE p.company_id=? AND p.status='ACTIVO' AND IFNULL(p.is_public,1)=1
+     GROUP BY c.id, c.name
+     ORDER BY COUNT(1) DESC, c.name
+     LIMIT 10;`,
+    [company.id]
+  );
+  const catOptions = `<option value="0">Todas las categorias</option>${categories
+    .map((c) => `<option value="${c.id}" ${categoryId === Number(c.id) ? "selected" : ""}>${escapeHtml(c.name)}</option>`)
+    .join("")}`;
+  const brandOptions = `<option value="0">Todas las marcas</option>${brands
+    .map((b) => `<option value="${b.id}" ${brandId === Number(b.id) ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
+    .join("")}`;
+  const sortOptions = [
+    ["name_asc", "Nombre A-Z"],
+    ["new_desc", "Mas recientes"],
+    ["price_asc", "Precio menor a mayor"],
+    ["price_desc", "Precio mayor a menor"],
+    ["stock_desc", "Mayor stock"],
+  ]
+    .map(([value, label]) => `<option value="${value}" ${sort === value ? "selected" : ""}>${label}</option>`)
+    .join("");
+  const buildCatalogUrl = (overrides = {}) => {
+    const nextQ = Object.prototype.hasOwnProperty.call(overrides, "q") ? String(overrides.q || "") : q;
+    const nextCategoryId = Object.prototype.hasOwnProperty.call(overrides, "categoryId") ? Number(overrides.categoryId || 0) : categoryId;
+    const nextBrandId = Object.prototype.hasOwnProperty.call(overrides, "brandId") ? Number(overrides.brandId || 0) : brandId;
+    const nextSort = Object.prototype.hasOwnProperty.call(overrides, "sort") ? String(overrides.sort || "name_asc") : sort;
+    const nextPage = Object.prototype.hasOwnProperty.call(overrides, "page") ? Number(overrides.page || 1) : 1;
+    const params = new URLSearchParams();
+    if (nextQ) params.set("q", nextQ);
+    if (nextCategoryId > 0) params.set("categoryId", String(nextCategoryId));
+    if (nextBrandId > 0) params.set("brandId", String(nextBrandId));
+    if (nextSort && nextSort !== "name_asc") params.set("sort", nextSort);
+    if (Number.isFinite(nextPage) && nextPage > 1) params.set("page", String(nextPage));
+    const qs = params.toString();
+    return `/public/${encodeURIComponent(company.slug)}/catalog${qs ? `?${qs}` : ""}`;
+  };
+  const activeCategory = categoryId > 0 ? categories.find((c) => Number(c.id) === categoryId) : null;
+  const activeBrand = brandId > 0 ? brands.find((b) => Number(b.id) === brandId) : null;
+  const activeSortLabel =
+    ({
+      name_asc: "Nombre A-Z",
+      new_desc: "Mas recientes",
+      price_asc: "Precio menor a mayor",
+      price_desc: "Precio mayor a menor",
+      stock_desc: "Mayor stock",
+    }[sort] || "Nombre A-Z");
+  const activeFilterTags = [
+    q
+      ? `<a class="filter-tag" href="${buildCatalogUrl({ q: "", page: 1 })}">Busqueda: "${escapeHtml(q)}" ×</a>`
+      : "",
+    activeCategory
+      ? `<a class="filter-tag" href="${buildCatalogUrl({ categoryId: 0, page: 1 })}">Categoria: ${escapeHtml(activeCategory.name)} ×</a>`
+      : "",
+    activeBrand
+      ? `<a class="filter-tag" href="${buildCatalogUrl({ brandId: 0, page: 1 })}">Marca: ${escapeHtml(activeBrand.name)} ×</a>`
+      : "",
+    sort !== "name_asc"
+      ? `<a class="filter-tag" href="${buildCatalogUrl({ sort: "name_asc", page: 1 })}">Orden: ${escapeHtml(activeSortLabel)} ×</a>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
+  const cards = products
+    .filter((p) => {
+      const reqSer = Number(p.requires_serial) === 1;
+      const stock = reqSer
+        ? Number(p.serial_units || 0)
+        : Math.max(Number(p.current_stock || 0), Number(p.located_stock || 0));
+      return Number(p.price || 0) > 0 && stock > 0;
+    })
+    .map((p) => {
+      const reqSer = Number(p.requires_serial) === 1;
+      const stock = reqSer
+        ? Number(p.serial_units || 0)
+        : Math.max(Number(p.current_stock || 0), Number(p.located_stock || 0));
+      const previous = Number(p.previous_price || 0);
+      const current = Number(p.price || 0);
+      const hasDiscount = previous > current && current > 0;
+      const pct = hasDiscount ? Math.round(((previous - current) / previous) * 100) : 0;
+      return `<article class="product-card">
+        <div class="product-media">
+          ${hasDiscount ? `<span class="badge">-${pct}%</span>` : ""}
+          <div class="card-tools">
+            <a href="#" class="icon-btn" data-wish="${company.slug}-${Number(p.id)}" aria-label="Favorito">♡</a>
+            <a href="#" class="icon-btn" data-compare data-id="${Number(p.id)}" data-name="${escapeHtml(p.name)}" data-price="${Number(
+              p.price || 0
+            )}" data-brand="${escapeHtml(p.brand_name || "-")}" data-model="${escapeHtml(p.model || "-")}" data-stock="${stock}" aria-label="Comparar">⤢</a>
+          </div>
+          <img src="${p.image_path ? escapeHtml(p.image_path) : "https://placehold.co/600x400/e2e8f0/475569?text=Sin+imagen"}" alt="${escapeHtml(
+          p.name
+        )}" />
+        </div>
+        <div class="pbody">
+          <strong class="product-title">${escapeHtml(p.name)}</strong>
+          <div class="muted product-meta">${escapeHtml(p.brand_name || "Marca")} ${p.model ? `· ${escapeHtml(p.model)}` : ""}</div>
+          <div class="price-row">
+            <span class="price">S/ ${Number(p.price).toFixed(2)}</span>
+            <span class="stock-chip">Stock ${stock}</span>
+          </div>
+          ${hasDiscount ? `<div class="old-price">Antes: <s>S/ ${previous.toFixed(2)}</s></div>` : ""}
+          <div class="product-actions">
+            <a href="/public/${encodeURIComponent(company.slug)}/product/${Number(p.id)}" class="solid">Ver detalle</a>
+            <a href="#" class="ghost" data-quick data-image="${p.image_path ? escapeHtml(p.image_path) : "https://placehold.co/600x400/e2e8f0/475569?text=Sin+imagen"}" data-name="${escapeHtml(
+              p.name
+            )}" data-brand="${escapeHtml(p.brand_name || "-")}" data-model="${escapeHtml(p.model || "-")}" data-price="${Number(
+              p.price || 0
+            )}" data-stock="${stock}" data-link="/public/${encodeURIComponent(company.slug)}/product/${Number(p.id)}">Vista rapida</a>
+          </div>
+        </div>
+      </article>`;
+    })
+    .join("");
+  const body = `<div class="container">
+      <div class="mobile-filter">
+        <a href="#" class="btn btn-secondary" data-open-mobile-filter>Filtrar productos</a>
+      </div>
+      <div class="catalog-layout">
+        <aside class="card catalog-sidebar">
+          <h3 style="margin:0 0 10px">Filtros</h3>
+          <form method="get" action="/public/${encodeURIComponent(company.slug)}/catalog" style="display:flex;flex-direction:column;gap:10px">
+            <div class="filter-group"><h4>Busqueda</h4><input type="search" name="q" value="${escapeHtml(q)}" placeholder="Nombre, SKU o modelo" /></div>
+            <div class="filter-group"><h4>Categoria</h4><select name="categoryId">${catOptions}</select></div>
+            <div class="filter-group"><h4>Marca</h4><select name="brandId">${brandOptions}</select></div>
+            <div class="filter-group"><h4>Orden</h4><select name="sort">${sortOptions}</select></div>
+            <button type="submit">Aplicar filtros</button>
+            <a class="btn btn-secondary" href="/public/${encodeURIComponent(company.slug)}/catalog">Limpiar</a>
+          </form>
+        </aside>
+        <section>
+          ${activeFilterTags ? `<div class="filter-summary" style="margin-bottom:10px">${activeFilterTags}</div>` : ""}
+          ${cards ? `<div class="product-grid">${cards}</div>` : "<div class='empty-box'>No hay productos disponibles para los filtros actuales.</div>"}
+          <div class="compare-bar" data-compare-bar>
+            <div class="compare-list" data-compare-list></div>
+            <a class="btn btn-secondary" href="#" data-open-compare>Abrir comparador</a>
+          </div>
+          <div class="pager">
+            <span class="muted">Pagina ${safePage} de ${totalPages}</span>
+            ${
+              safePage > 1
+                ? `<a class="btn btn-secondary" href="/public/${encodeURIComponent(company.slug)}/catalog?q=${encodeURIComponent(q)}&categoryId=${categoryId}&brandId=${brandId}&sort=${encodeURIComponent(sort)}&page=${safePage - 1}">Anterior</a>`
+                : ""
+            }
+            ${
+              safePage < totalPages
+                ? `<a class="btn btn-secondary" href="/public/${encodeURIComponent(company.slug)}/catalog?q=${encodeURIComponent(q)}&categoryId=${categoryId}&brandId=${brandId}&sort=${encodeURIComponent(sort)}&page=${safePage + 1}">Siguiente</a>`
+                : ""
+            }
+          </div>
+        </section>
+      </div>
+      <div class="modal-overlay" data-mobile-filter-modal>
+        <div class="modal-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px">
+            <strong>Filtros catalogo</strong>
+            <button class="btn-compact" type="button" data-close-mobile-filter>Cerrar</button>
+          </div>
+          <form method="get" action="/public/${encodeURIComponent(company.slug)}/catalog" style="display:flex;flex-direction:column;gap:10px">
+            <div class="filter-group"><h4>Busqueda</h4><input type="search" name="q" value="${escapeHtml(q)}" placeholder="Nombre, SKU o modelo" /></div>
+            <div class="filter-group"><h4>Categoria</h4><select name="categoryId">${catOptions}</select></div>
+            <div class="filter-group"><h4>Marca</h4><select name="brandId">${brandOptions}</select></div>
+            <div class="filter-group"><h4>Orden</h4><select name="sort">${sortOptions}</select></div>
+            <button type="submit">Aplicar filtros</button>
+            <a class="btn btn-secondary" href="/public/${encodeURIComponent(company.slug)}/catalog">Limpiar</a>
+          </form>
+        </div>
+      </div>
+      <div class="modal-overlay" data-quick-modal>
+        <div class="modal-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px">
+            <strong>Vista rapida</strong>
+            <button class="btn-compact" type="button" data-quick-close>Cerrar</button>
+          </div>
+          <div data-quick-body></div>
+        </div>
+      </div>
+      ${
+        (() => {
+          const rawContact = String(company.public_contact || "").trim();
+          const phone = rawContact.replace(/[^\d]/g, "");
+          const waLink = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(`Hola, quiero cotizar productos de ${company.name}`)}` : "";
+          if (!rawContact && !waLink) return "";
+          return `<div class="floating-contact">
+            ${waLink ? `<a class="wa" href="${waLink}" target="_blank" rel="noopener">WhatsApp</a>` : ""}
+            ${rawContact ? `<a class="call" href="tel:${escapeHtml(phone || rawContact)}">Llamar</a>` : ""}
+          </div>`;
+        })()
+      }`;
+  res.send(
+    renderPublicLayout(`Catalogo ${company.name}`, body, {
+      description: `Catalogo de ${company.name} con filtros, comparador y ofertas activas.`,
+      canonical: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      image: company.logo_path || "",
+      brandTitle: company.name,
+      brandLogo: company.logo_path || "",
+      homeLink: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      catalogLink: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      searchAction: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      searchQuery: q,
+      scopedNav: true,
+      backgroundImage: company.public_background_path || "",
+      showDirectoryLink: false,
+      loginLink: `/login?empresa=${encodeURIComponent(company.slug)}`,
+      sessionUser: req.session.user || null,
+      modulesLink: "/",
+      publicCatalogLink: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      logoutRedirectTo: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      breadcrumbHtml: ``,
+    })
+  );
+});
+
+app.get("/public/:slug/product/:productId", async (req, res) => {
+  await ensureAllCompanySlugs();
+  const slug = String(req.params.slug || "").trim();
+  const productId = Number(req.params.productId || 0);
+  if (!Number.isFinite(productId) || productId < 1) return res.status(404).send("Producto no encontrado");
+  const company = await get(
+    `SELECT id, name, IFNULL(logo_path,'') AS logo_path, IFNULL(slug,'') AS slug, IFNULL(public_contact,'') AS public_contact,
+      IFNULL(public_background_path,'') AS public_background_path, IFNULL(public_title,'') AS public_title,
+      IFNULL(public_description,'') AS public_description, IFNULL(email,'') AS email, IFNULL(phone,'') AS phone,
+      IFNULL(whatsapp,'') AS whatsapp, IFNULL(address,'') AS address, IFNULL(city,'') AS city, IFNULL(country,'') AS country,
+      IFNULL(website,'') AS website, IFNULL(business_hours,'') AS business_hours, IFNULL(public_features,'') AS public_features
+     FROM companies WHERE status='ACT' AND slug=?;`,
+    [slug]
+  );
+  if (!company) return res.status(404).send("Empresa no encontrada");
+  if (req.session.user && Number(req.session.user.companyId) !== Number(company.id)) {
+    return res.status(403).send("Acceso no permitido para otra empresa.");
+  }
+  const product = await get(
+    `SELECT p.id, p.name, IFNULL(p.sku,'') AS sku, IFNULL(p.model,'') AS model, IFNULL(p.description,'') AS description,
+      IFNULL(p.image_path,'') AS image_path, IFNULL(p.requires_serial,0) AS requires_serial, IFNULL(p.current_stock,0) AS current_stock,
+      IFNULL((SELECT COUNT(1) FROM product_serials ps WHERE ps.company_id=p.company_id AND ps.product_id=p.id AND ps.status='EN_STOCK'),0) AS serial_units,
+      IFNULL((SELECT SUM(il.quantity) FROM inventory_locations il WHERE il.company_id=p.company_id AND il.product_id=p.id),0) AS located_stock,
+      IFNULL((SELECT pp.price FROM product_prices pp WHERE pp.company_id=p.company_id AND pp.product_id=p.id ORDER BY datetime(pp.effective_date) DESC LIMIT 1),0) AS price,
+      IFNULL((SELECT pp.price FROM product_prices pp WHERE pp.company_id=p.company_id AND pp.product_id=p.id ORDER BY datetime(pp.effective_date) DESC LIMIT 1 OFFSET 1),0) AS previous_price,
+      IFNULL(c.name,'') AS category_name, IFNULL(b.name,'') AS brand_name
+     FROM products p
+     LEFT JOIN categories c ON c.id=p.category_id AND c.company_id=p.company_id
+     LEFT JOIN brands b ON b.id=p.brand_id AND b.company_id=p.company_id
+     WHERE p.company_id=? AND p.id=? AND p.status='ACTIVO' AND IFNULL(p.is_public,1)=1;`,
+    [company.id, productId]
+  );
+  if (!product) return res.status(404).send("Producto no encontrado");
+  const stock =
+    Number(product.requires_serial) === 1
+      ? Number(product.serial_units || 0)
+      : Math.max(Number(product.current_stock || 0), Number(product.located_stock || 0));
+  const prev = Number(product.previous_price || 0);
+  const curr = Number(product.price || 0);
+  const hasDiscount = prev > curr && curr > 0;
+  const pct = hasDiscount ? Math.round(((prev - curr) / prev) * 100) : 0;
+  const rawContact = String(company.public_contact || "").trim();
+  const phone = rawContact.replace(/[^\d]/g, "");
+  const waLink = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(`Hola, quiero cotizar ${product.name}`)}` : "";
+  const relatedProducts = await all(
+    `SELECT p.id, p.name, IFNULL(p.image_path,'') AS image_path,
+      IFNULL((SELECT pp.price FROM product_prices pp WHERE pp.company_id=p.company_id AND pp.product_id=p.id ORDER BY datetime(pp.effective_date) DESC LIMIT 1),0) AS price
+     FROM products p
+     WHERE p.company_id=? AND p.status='ACTIVO' AND IFNULL(p.is_public,1)=1 AND p.id<>?
+       AND (
+        (p.category_id IS NOT NULL AND p.category_id=(SELECT category_id FROM products WHERE id=? AND company_id=?))
+        OR (p.brand_id IS NOT NULL AND p.brand_id=(SELECT brand_id FROM products WHERE id=? AND company_id=?))
+       )
+     ORDER BY p.id DESC
+     LIMIT 4;`,
+    [company.id, productId, productId, company.id, productId, company.id]
+  );
+  const relatedCards = relatedProducts
+    .map(
+      (p) => `<article class="product-card">
+        <div class="product-media"><img src="${
+          p.image_path ? escapeHtml(p.image_path) : "https://placehold.co/600x400/e2e8f0/475569?text=Sin+imagen"
+        }" alt="${escapeHtml(p.name)}" /></div>
+        <div class="pbody">
+          <strong class="product-title">${escapeHtml(p.name)}</strong>
+          <div class="price-row"><span class="price">S/ ${Number(p.price || 0).toFixed(2)}</span></div>
+          <div class="product-actions"><a class="solid" href="/public/${encodeURIComponent(company.slug)}/product/${Number(p.id)}">Ver detalle</a></div>
+        </div>
+      </article>`
+    )
+    .join("");
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: product.name,
+    image: product.image_path || company.logo_path || "",
+    description: product.description || "",
+    sku: product.sku || "",
+    brand: { "@type": "Brand", name: product.brand_name || "Generico" },
+    offers: {
+      "@type": "Offer",
+      priceCurrency: "PEN",
+      price: curr.toFixed(2),
+      availability: stock > 0 ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
+      url: `/public/${encodeURIComponent(company.slug)}/product/${Number(product.id)}`,
+    },
+  };
+  const body = `<div class="hero"><div class="hero-wrap">
+      <div class="hero-main">
+        <h1>${escapeHtml(product.name)}</h1>
+        <p>${escapeHtml(product.description || "Producto de linea electro con stock y precio actualizado en tiempo real.")}</p>
+        <div class="hero-badges"><span>${escapeHtml(product.brand_name || "Marca")}</span><span>${escapeHtml(product.category_name || "Categoria")}</span><span>SKU ${escapeHtml(product.sku || "-")}</span></div>
+        <div class="top-nav">
+          <a href="/public/${encodeURIComponent(company.slug)}/catalog">Catalogo</a>
+        </div>
+      </div>
+      <aside class="hero-side">
+        <img src="${product.image_path ? escapeHtml(product.image_path) : "https://placehold.co/900x700/e2e8f0/475569?text=Sin+imagen"}" class="hero-logo" alt="${escapeHtml(
+    product.name
+  )}" style="max-height:260px;height:260px;object-fit:cover" />
+      </aside>
+    </div></div>
+    <div class="container">
+      <div class="grid" style="grid-template-columns:2fr 1fr">
+        <div class="card">
+          <h3 style="margin:0 0 10px">Ficha del producto</h3>
+          <p><strong>Nombre:</strong> ${escapeHtml(product.name)}</p>
+          <p><strong>Marca:</strong> ${escapeHtml(product.brand_name || "-")}</p>
+          <p><strong>Categoria:</strong> ${escapeHtml(product.category_name || "-")}</p>
+          <p><strong>Modelo:</strong> ${escapeHtml(product.model || "-")}</p>
+          <p><strong>SKU:</strong> ${escapeHtml(product.sku || "-")}</p>
+          <p><strong>Descripcion:</strong> ${escapeHtml(product.description || "Sin descripcion cargada.")}</p>
+        </div>
+        <div class="card">
+          <h3 style="margin:0 0 10px">Precio y disponibilidad</h3>
+          <p class="price" style="margin:0 0 6px">S/ ${curr.toFixed(2)}</p>
+          ${hasDiscount ? `<p class="muted" style="margin:0 0 6px">Antes: <s>S/ ${prev.toFixed(2)}</s> · Ahorro ${pct}%</p>` : ""}
+          <p><span class="stock-chip">Stock ${stock}</span></p>
+          <div class="product-actions">
+            <a class="ghost" href="/public/${encodeURIComponent(company.slug)}/catalog">Volver al catalogo</a>
+            <a class="solid" href="${waLink || "/login"}" ${waLink ? 'target="_blank" rel="noopener"' : ""}>${waLink ? "Cotizar por WhatsApp" : "Iniciar sesion"}</a>
+          </div>
+          <p class="muted" style="margin-top:10px">Contacto comercial: ${escapeHtml(rawContact || "No configurado")}</p>
+        </div>
+    </div>
+    <h2 class="section-title">Productos relacionados</h2>
+    ${relatedCards ? `<div class="product-grid">${relatedCards}</div>` : "<div class='empty-box'>Sin relacionados para mostrar.</div>"}
+    <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
+    ${
+      waLink || rawContact
+        ? `<div class="floating-contact">
+             ${waLink ? `<a class="wa" href="${waLink}" target="_blank" rel="noopener">WhatsApp</a>` : ""}
+             ${rawContact ? `<a class="call" href="tel:${escapeHtml(phone || rawContact)}">Llamar</a>` : ""}
+           </div>`
+        : ""
+    }
+    </div>`;
+  res.send(
+    renderPublicLayout(`${product.name} - ${company.name}`, body, {
+      description: product.description || `${product.name} en ${company.name}.`,
+      canonical: `/public/${encodeURIComponent(company.slug)}/product/${Number(product.id)}`,
+      image: product.image_path || company.logo_path || "",
+      brandTitle: company.name,
+      brandLogo: company.logo_path || "",
+      homeLink: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      catalogLink: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      searchAction: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      scopedNav: true,
+      backgroundImage: company.public_background_path || "",
+      showDirectoryLink: false,
+      loginLink: `/login?empresa=${encodeURIComponent(company.slug)}`,
+      sessionUser: req.session.user || null,
+      modulesLink: "/",
+      publicCatalogLink: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      logoutRedirectTo: `/public/${encodeURIComponent(company.slug)}/catalog`,
+      breadcrumbHtml: `<nav class="breadcrumbs"><a href="/public/${encodeURIComponent(
+        company.slug
+      )}/catalog">Catalogo</a><span class="breadcrumbs-sep">/</span><span>${escapeHtml(product.name)}</span></nav>`,
+    })
+  );
+});
+
 app.get("/", (req, res) => {
   if (!req.session.user) return res.redirect("/login");
   const modules = req.session.user.allowedModules || [];
@@ -2102,42 +3741,292 @@ app.get("/login", async (req, res) => {
   // Si otro proceso (p.ej. init/import) actualizo la BD en disco,
   // refrescamos la instancia en memoria para reflejar empresas creadas.
   await reloadFromDisk();
-  const companies = await all("SELECT id, name FROM companies WHERE status='ACT' ORDER BY name;");
-  const companyOptions = companies
-    .map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
-    .join("");
+  const empresaSlug = String(req.query.empresa || "").trim();
+  const directoryPassword = String(process.env.PUBLIC_DIRECTORY_PASSWORD || "").trim();
+  const gateError = String(req.query.gateError || "").trim();
+  if (!empresaSlug && !req.session.privateLoginUnlocked) {
+    if (!directoryPassword) {
+      return res.send(
+        renderAccessGatePage("Acceso restringido", "Ingresa la clave para continuar", {
+          action: "/login/unlock",
+          restrictedText: "Acceso restringido",
+        })
+      );
+    }
+    return res.send(
+      renderAccessGatePage("Acceso privado", "Ingresa la clave para continuar", {
+        action: "/login/unlock",
+        placeholder: "Clave de acceso",
+        buttonText: "Ingresar",
+        errorText: gateError ? "Clave incorrecta" : "",
+      })
+    );
+  }
+  const companyBySlug = empresaSlug
+    ? await get("SELECT id, name, IFNULL(logo_path,'') AS logo_path FROM companies WHERE status='ACT' AND slug=?;", [
+        empresaSlug,
+      ])
+    : null;
+  const companies = companyBySlug
+    ? []
+    : await all("SELECT id, name FROM companies WHERE status='ACT' ORDER BY name;");
+  const companyOptions = companies.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("");
   const error = req.query.error ? `<div class="error">${escapeHtml(req.query.error)}</div>` : "";
+
+  if (companyBySlug) {
+    const initials = escapeHtml(String(companyBySlug.name || "E").trim().slice(0, 1).toUpperCase());
+    const logoHtml = String(companyBySlug.logo_path || "").trim()
+      ? `<img src="${escapeHtml(companyBySlug.logo_path)}" alt="${escapeHtml(
+          companyBySlug.name
+        )}" class="company-login-logo" />`
+      : `<div class="company-login-avatar" aria-hidden="true">${initials}</div>`;
+    const html = `
+      <style>
+        .company-login-page{
+          min-height:calc(100vh - 0px);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:20px;
+          background:
+            radial-gradient(1200px 600px at 20% 10%, rgba(215,25,32,.10), rgba(215,25,32,0) 60%),
+            radial-gradient(900px 520px at 80% 0%, rgba(59,130,246,.10), rgba(59,130,246,0) 60%),
+            linear-gradient(180deg, #eef2ff, #f8fafc);
+        }
+        .company-login-card{
+          width:min(420px, 100%);
+          background:rgba(255,255,255,.92);
+          border:1px solid #e2e8f0;
+          border-radius:20px;
+          box-shadow:0 24px 60px rgba(15,23,42,.14);
+          padding:30px 28px;
+          backdrop-filter: blur(8px);
+        }
+        .company-login-brand{display:flex;flex-direction:column;align-items:center;margin-bottom:18px}
+        .company-login-logo{height:68px;max-width:240px;object-fit:contain;margin-bottom:16px}
+        .company-login-avatar{
+          width:64px;height:64px;border-radius:999px;
+          display:flex;align-items:center;justify-content:center;
+          background:linear-gradient(180deg,#ffffff,#f1f5f9);
+          border:1px solid #e2e8f0;
+          font-weight:900;font-size:22px;color:#0f172a;
+          margin-bottom:16px;
+        }
+        .company-login-title{margin:0;font-size:20px;font-weight:800;letter-spacing:-.02em;color:#0f172a}
+        .company-login-sub{margin:6px 0 0;font-size:13px;color:#64748b}
+        .company-login-form{margin-top:18px;display:flex;flex-direction:column;gap:12px}
+        .company-login-label{font-size:12px;font-weight:800;color:#334155;margin:0 0 6px}
+        .company-login-input{
+          width:100%;
+          padding:14px 14px;
+          border-radius:12px;
+          border:1px solid #cbd5e1;
+          font-size:14px;
+          outline:none;
+          background:#fff;
+        }
+        .company-login-input:focus{
+          border-color:rgba(215,25,32,.55);
+          box-shadow:0 0 0 4px rgba(215,25,32,.14);
+        }
+        .company-passwrap{position:relative}
+        .company-passwrap .company-login-input{padding-right:90px}
+        .company-passwrap button{width:auto;min-width:auto}
+        .company-passbtn{
+          position:absolute;right:10px;top:50%;transform:translateY(-50%);
+          border:1px solid #d1d5db;background:#fff;color:#111827;
+          border-radius:10px;
+          width:auto;
+          min-width:auto;
+          height:34px;
+          padding:0 12px;
+          font-size:12px;
+          font-weight:800;
+          display:inline-flex;
+          align-items:center;
+          justify-content:center;
+          white-space:nowrap;
+          cursor:pointer;
+        }
+        .company-passbtn:hover{border-color:#9ca3af}
+        .company-login-row{
+          display:flex;align-items:center;justify-content:space-between;gap:10px;
+          margin-top:2px;
+        }
+        .company-login-check{display:flex;align-items:center;gap:8px;color:#334155;font-size:13px}
+        .company-login-check input{width:16px;height:16px}
+        .company-login-link{color:#0f172a;text-decoration:none;font-weight:800;font-size:13px}
+        .company-login-link:hover{text-decoration:underline}
+        .company-login-submit{
+          margin-top:6px;
+          width:100%;
+          min-height:50px;
+          border:none;
+          border-radius:12px;
+          background:#d71920;
+          color:#fff;
+          font-weight:900;
+          font-size:14px;
+          cursor:pointer;
+          box-shadow:0 10px 22px rgba(215,25,32,.18);
+        }
+        .company-login-submit:hover{background:#b40d16}
+        .company-login-submit:disabled{opacity:.6;cursor:not-allowed;box-shadow:none}
+        .company-login-error{
+          margin:12px 0 0;
+          padding:10px 12px;
+          border-radius:14px;
+          border:1px solid #fecaca;
+          background:#fef2f2;
+          color:#991b1b;
+          font-size:13px;
+        }
+      </style>
+      <div class="company-login-page">
+        <div class="company-login-card">
+          <div class="company-login-brand">
+            ${logoHtml}
+            <h1 class="company-login-title">Iniciar sesión</h1>
+            <p class="company-login-sub">Accede a tu cuenta</p>
+          </div>
+          ${error ? `<div class="company-login-error">Correo o contraseña incorrectos</div>` : ""}
+          <form class="company-login-form" method="post" action="/login?empresa=${encodeURIComponent(empresaSlug)}" id="companyLoginForm">
+            <div>
+              <div class="company-login-label">Correo electrónico</div>
+              <input class="company-login-input" name="username" placeholder="correo@empresa.com" autocomplete="username" required />
+            </div>
+            <div>
+              <div class="company-login-label">Contraseña</div>
+              <div class="company-passwrap">
+                <input class="company-login-input" id="companyLoginPassword" type="password" name="password" autocomplete="current-password" required />
+                <button type="button" class="company-passbtn" id="companyTogglePass">Mostrar</button>
+              </div>
+            </div>
+            <input type="hidden" name="companyId" value="${Number(companyBySlug.id)}" />
+            <div class="company-login-row">
+              <label class="company-login-check"><input type="checkbox" name="remember" value="1" /> Recordar sesión</label>
+              <a class="company-login-link" href="#" onclick="return false;">¿Olvidaste tu contraseña?</a>
+            </div>
+            <button class="company-login-submit" type="submit" id="companyLoginSubmit" disabled>Iniciar sesión</button>
+          </form>
+          <script>
+            (function(){
+              const passBtn = document.getElementById("companyTogglePass");
+              const passInput = document.getElementById("companyLoginPassword");
+              const form = document.getElementById("companyLoginForm");
+              const submit = document.getElementById("companyLoginSubmit");
+              const user = form ? form.querySelector("input[name='username']") : null;
+              function sync(){
+                if(!submit || !user || !passInput) return;
+                const ok = String(user.value||"").trim().length > 0 && String(passInput.value||"").trim().length > 0;
+                submit.disabled = !ok;
+              }
+              if(passBtn && passInput){
+                passBtn.addEventListener("click", function(){
+                  const hidden = passInput.type === "password";
+                  passInput.type = hidden ? "text" : "password";
+                  passBtn.textContent = hidden ? "Ocultar" : "Mostrar";
+                });
+              }
+              if(user) user.addEventListener("input", sync);
+              if(passInput) passInput.addEventListener("input", sync);
+              if(form && submit){
+                form.addEventListener("submit", function(){
+                  submit.disabled = true;
+                  submit.textContent = "Ingresando...";
+                });
+              }
+              sync();
+            })();
+          </script>
+        </div>
+      </div>
+    `;
+    return res.send(renderLayout("Login", html));
+  }
 
   const html = `
     <div class="login-wrap">
-      <div class="login-box">
-        <h2 class="login-title">Post Venta</h2>
-        <p class="muted">Plataforma corporativa multiempresa para electrodomesticos</p>
-        ${error}
-        <form method="post" action="/login">
-          <label>Usuario</label>
-          <input name="username" required />
-          <label>Contrasena</label>
-          <input type="password" name="password" required />
-          <label>Empresa</label>
-          <select name="companyId" required>
-            ${companyOptions}
-          </select>
-          <div style="margin-top:14px;">
-            <button type="submit">Iniciar sesion</button>
+      <div class="auth-shell">
+        <aside class="auth-left" aria-hidden="true">
+          <div class="auth-brand">
+            <span class="auth-dot"></span>
+            <h1>Post Venta</h1>
           </div>
-        </form>
-        <p class="muted" style="margin-top:12px">Empresa principal: usuario <strong>admin</strong>, contrasena <strong>admin123</strong>. Otras empresas: usuario <strong>admin_</strong> mas el ID de empresa (ej. <strong>admin_2</strong>), misma contrasena.</p>
+          <p>Plataforma SaaS multiempresa</p>
+          <ul class="auth-bullets">
+            <li><span>✓</span>Gestion operativa</li>
+            <li><span>✓</span>Control de usuarios</li>
+            <li><span>✓</span>Catalogo y post venta</li>
+          </ul>
+        </aside>
+        <div class="auth-right">
+          <div class="login-box">
+            <h2 class="login-title">Iniciar sesion</h2>
+            <p class="login-subtitle">Accede a tu cuenta</p>
+            ${error}
+            <form method="post" action="/login">
+              <label class="login-label">Correo electronico</label>
+              <input name="username" placeholder="correo@empresa.com" required />
+              <label class="login-label">Contrasena</label>
+              <div class="password-wrap">
+                <input id="loginPassword" type="password" name="password" required />
+                <button type="button" class="password-toggle" id="togglePasswordBtn" aria-label="Mostrar u ocultar contrasena">Mostrar</button>
+              </div>
+              <label class="login-label">Selecciona tu empresa</label>
+              <select name="companyId" required>${companyOptions}</select>
+              <div class="login-row">
+                <label class="login-check"><input type="checkbox" name="remember" value="1" /> Recordar sesion</label>
+                <a class="login-link" href="#" onclick="return false;">Olvidaste tu contrasena?</a>
+              </div>
+              <div class="login-submit">
+                <button type="submit">Iniciar sesion</button>
+              </div>
+            </form>
+            <script>
+              (function(){
+                const btn = document.getElementById("togglePasswordBtn");
+                const input = document.getElementById("loginPassword");
+                if(!btn || !input) return;
+                btn.addEventListener("click", function(){
+                  const hidden = input.type === "password";
+                  input.type = hidden ? "text" : "password";
+                  btn.textContent = hidden ? "Ocultar" : "Mostrar";
+                });
+              })();
+            </script>
+          </div>
+        </div>
       </div>
     </div>`;
   res.send(renderLayout("Login", html));
 });
 
+app.post("/login/unlock", (req, res) => {
+  const directoryPassword = String(process.env.PUBLIC_DIRECTORY_PASSWORD || "").trim();
+  if (!directoryPassword) return res.redirect("/login");
+  const pass = String(req.body.password || "").trim();
+  if (pass && pass === directoryPassword) {
+    req.session.privateLoginUnlocked = true;
+    return res.redirect("/login");
+  }
+  return res.redirect("/login?gateError=1");
+});
+
 app.post("/login", async (req, res) => {
   await reloadFromDisk();
+  const empresaSlug = String(req.query.empresa || "").trim();
   const username = String(req.body.username ?? "").trim();
   const password = String(req.body.password ?? "").trim();
-  const companyId = Number(req.body.companyId);
+  const companyIdFromBody = Number(req.body.companyId);
+  const companyId = empresaSlug
+    ? Number(
+        (
+          await get("SELECT id FROM companies WHERE status='ACT' AND slug=?;", [empresaSlug])
+        )?.id || 0
+      )
+    : companyIdFromBody;
+  const remember = String(req.body.remember || "") === "1";
   if (!username || !password || !Number.isInteger(companyId) || companyId < 1) {
     return res.redirect("/login?error=Credenciales+o+empresa+incorrecta");
   }
@@ -2169,7 +4058,7 @@ app.post("/login", async (req, res) => {
   }
 
   const company = await get(
-    "SELECT id, name, IFNULL(TRIM(ruc),'') AS ruc FROM companies WHERE id = ?;",
+    "SELECT id, name, IFNULL(TRIM(ruc),'') AS ruc, IFNULL(logo_path,'') AS logo_path FROM companies WHERE id = ?;",
     [user.company_id]
   );
   if (!company) {
@@ -2181,7 +4070,7 @@ app.post("/login", async (req, res) => {
   } else if (user.role === "admin") {
     allowedModules = MODULES.map((m) => m.key);
   } else {
-    allowedModules = ["dashboard"];
+    allowedModules = ["products", "stock"];
   }
 
   req.session.user = {
@@ -2191,43 +4080,55 @@ app.post("/login", async (req, res) => {
     companyId: user.company_id,
     companyName: company.name,
     companyRuc: company.ruc || "",
+    companyLogoPath: company.logo_path || "",
     profileId: user.profile_id,
     workerId: user.worker_id,
     allowedModules,
   };
+  req.session.cookie.maxAge = remember ? 30 * 24 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000;
   return res.redirect(getDefaultLandingPath(allowedModules));
 });
 
 app.post("/logout", (req, res) => {
-  req.session.destroy(() => res.redirect("/login"));
+  const redirectTo = String(req.body.redirectTo || req.query.redirectTo || "").trim();
+  const safeRedirect = redirectTo && redirectTo.startsWith("/public/") ? redirectTo : "/login";
+  req.session.destroy(() => res.redirect(safeRedirect));
 });
 
 app.get("/modules/users", requireAuth, requireAnyModule(["users", "profiles", "approvers"]), async (req, res) => {
-  const { companyName, username, allowedModules } = req.session.user;
+  const { companyName, companyLogoPath, username, allowedModules } = req.session.user;
   const html = renderAppShell({
     title: "Gestion de usuarios",
     subtitle: "Administra usuarios y perfiles",
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "user-management",
     activeSection: "",
-    body: `<p class="muted">Selecciona un apartado del menu lateral para continuar.</p>`,
+    body: `<div class="empty-box">
+      <strong style="display:block;font-size:15px;color:#0f172a;margin-bottom:6px">Selecciona una opción</strong>
+      <div class="muted">Elige un apartado del menú lateral para comenzar.</div>
+    </div>`,
   });
   res.send(renderLayout("Gestion de usuarios", html));
 });
 
 app.get("/modules/talent", requireAuth, requireAnyModule(["workers"]), async (req, res) => {
-  const { companyName, username, allowedModules } = req.session.user;
+  const { companyName, companyLogoPath, username, allowedModules } = req.session.user;
   const html = renderAppShell({
     title: "Talento humano",
     subtitle: "Gestion del personal por empresa",
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "human-talent",
     activeSection: "",
-    body: `<p class="muted">Selecciona un apartado del menu lateral para continuar.</p>`,
+    body: `<div class="empty-box">
+      <strong style="display:block;font-size:15px;color:#0f172a;margin-bottom:6px">Selecciona una opción</strong>
+      <div class="muted">Elige un apartado del menú lateral para comenzar.</div>
+    </div>`,
   });
   res.send(renderLayout("Talento humano", html));
 });
@@ -2253,16 +4154,20 @@ app.get(
     "kardex",
   ]),
   async (req, res) => {
-    const { companyName, username, allowedModules } = req.session.user;
+    const { companyName, companyLogoPath, username, allowedModules } = req.session.user;
     const html = renderAppShell({
       title: "Logistica",
       subtitle: "Operacion de productos, abastecimiento y clientes",
       companyName,
+      companyLogoPath,
       username,
       allowedModules,
       activeGroup: "logistics",
       activeSection: "",
-      body: `<p class="muted">Selecciona un apartado logistico desde el menu lateral.</p>`,
+      body: `<div class="empty-box">
+        <strong style="display:block;font-size:15px;color:#0f172a;margin-bottom:6px">Selecciona una opción</strong>
+        <div class="muted">Elige un apartado del menú lateral para comenzar.</div>
+      </div>`,
     });
     res.send(renderLayout("Logistica", html));
   }
@@ -2273,16 +4178,20 @@ app.get(
   requireAuth,
   requireAnyModule(["company_settings"]),
   async (req, res) => {
-    const { companyName, username, allowedModules } = req.session.user;
+    const { companyName, companyLogoPath, username, allowedModules } = req.session.user;
     const html = renderAppShell({
       title: "Empresa",
       subtitle: "Datos y logo corporativo",
       companyName,
+      companyLogoPath,
       username,
       allowedModules,
       activeGroup: "company",
       activeSection: "",
-      body: `<p class="muted">Selecciona <strong>Mi empresa</strong> en el menu lateral.</p>`,
+      body: `<div class="empty-box">
+        <strong style="display:block;font-size:15px;color:#0f172a;margin-bottom:6px">Selecciona una opción</strong>
+        <div class="muted">Elige un apartado del menú lateral para comenzar.</div>
+      </div>`,
     });
     res.send(renderLayout("Empresa", html));
   }
@@ -2302,29 +4211,41 @@ app.get(
     "sales_reports",
   ]),
   async (req, res) => {
-    const { companyName, username, allowedModules } = req.session.user;
+    const { companyName, companyLogoPath, username, allowedModules } = req.session.user;
     const html = renderAppShell({
       title: "Ventas",
       subtitle: "Caja, POS, precios y gastos",
       companyName,
+      companyLogoPath,
       username,
       allowedModules,
       activeGroup: "sales",
       activeSection: "",
-      body: `<p class="muted">Selecciona un apartado de ventas desde el menu lateral.</p>`,
+      body: `<div class="empty-box">
+        <strong style="display:block;font-size:15px;color:#0f172a;margin-bottom:6px">Selecciona una opción</strong>
+        <div class="muted">Elige un apartado del menú lateral para comenzar.</div>
+      </div>`,
     });
     res.send(renderLayout("Ventas", html));
   }
 );
 
 app.get("/company", requireAuth, requireModule("company_settings"), async (req, res) => {
-  const { companyId, companyName, companyRuc, username, allowedModules } = req.session.user;
+  const { companyId, companyName, companyRuc, companyLogoPath, username, allowedModules } = req.session.user;
   const ok = req.query.ok ? `<div class="ok">${escapeHtml(req.query.ok)}</div>` : "";
   const err = req.query.error ? `<div class="error">${escapeHtml(req.query.error)}</div>` : "";
   const co = await get(
-    "SELECT id, name, IFNULL(TRIM(ruc),'') AS ruc, IFNULL(logo_path,'') AS logo_path, IFNULL(cash_reopen_days,7) AS cash_reopen_days FROM companies WHERE id=?;",
+    `SELECT id, name, IFNULL(TRIM(ruc),'') AS ruc, IFNULL(logo_path,'') AS logo_path, IFNULL(cash_reopen_days,7) AS cash_reopen_days,
+      IFNULL(slug,'') AS slug, IFNULL(public_title,'') AS public_title, IFNULL(public_description,'') AS public_description,
+      IFNULL(public_mission,'') AS public_mission, IFNULL(public_vision,'') AS public_vision, IFNULL(public_contact,'') AS public_contact,
+      IFNULL(public_background_path,'') AS public_background_path, IFNULL(email,'') AS email, IFNULL(phone,'') AS phone,
+      IFNULL(whatsapp,'') AS whatsapp, IFNULL(address,'') AS address, IFNULL(city,'') AS city, IFNULL(country,'') AS country,
+      IFNULL(latitude,0) AS latitude, IFNULL(longitude,0) AS longitude, IFNULL(website,'') AS website,
+      IFNULL(business_hours,'') AS business_hours, IFNULL(public_features,'') AS public_features
+     FROM companies WHERE id=?;`,
     [companyId]
   );
+  const slug = (await ensureCompanySlug(companyId, co?.name || companyName)) || "";
   const reopenDays = Number(co?.cash_reopen_days ?? 7);
   const branches = await all(
     "SELECT id, name, status FROM branches WHERE company_id=? ORDER BY status DESC, name;",
@@ -2347,6 +4268,7 @@ app.get("/company", requireAuth, requireModule("company_settings"), async (req, 
     title: "Mi empresa",
     subtitle: "Nombre, RUC y logo (solo tu empresa)",
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "company",
@@ -2356,13 +4278,45 @@ app.get("/company", requireAuth, requireModule("company_settings"), async (req, 
         <div class="form-grid">
           <input name="name" value="${escapeHtml(co?.name || "")}" placeholder="Razon social" required />
           <input name="ruc" value="${escapeHtml(co?.ruc || "")}" placeholder="RUC" maxlength="20" />
+          <input name="slug" value="${escapeHtml(slug)}" placeholder="Slug publico (ej: mi-empresa)" required />
           <div>
             <label class="muted">Dias para ver / reabrir cajas cerradas (aprobadores)</label>
             <input type="number" name="cash_reopen_days" min="1" max="365" value="${Number.isFinite(reopenDays) ? reopenDays : 7}" />
           </div>
-          <div><label class="muted">Logo (JPG/PNG/WebP, max 4MB)</label><input type="file" name="logo" accept="image/*" /></div>
+          <div><label class="muted">Logo (JPG/PNG/WebP/GIF, max 8MB)</label><input type="file" name="logo" accept="image/*" /></div>
+          <div><label class="muted">Fondo publico (JPG/PNG/WebP/GIF)</label><input type="file" name="public_background" accept="image/*" /></div>
+        </div>
+        <div class="form-grid">
+          <input name="public_title" value="${escapeHtml(co?.public_title || "")}" placeholder="Titulo publico (inicio)" />
+          <input name="public_contact" value="${escapeHtml(co?.public_contact || "")}" placeholder="Contacto publico (telefono/correo)" />
+          <input name="email" value="${escapeHtml(co?.email || "")}" placeholder="Email publico" />
+          <input name="phone" value="${escapeHtml(co?.phone || "")}" placeholder="Telefono publico" />
+          <input name="whatsapp" value="${escapeHtml(co?.whatsapp || "")}" placeholder="WhatsApp publico" />
+          <input name="website" value="${escapeHtml(co?.website || "")}" placeholder="Sitio web (https://...)" />
+          <input name="address" value="${escapeHtml(co?.address || "")}" placeholder="Direccion" />
+          <input name="city" value="${escapeHtml(co?.city || "")}" placeholder="Ciudad" />
+          <input name="country" value="${escapeHtml(co?.country || "")}" placeholder="Pais" />
+          <input type="number" step="0.000001" name="latitude" value="${Number(co?.latitude || 0) || ""}" placeholder="Latitud" />
+          <input type="number" step="0.000001" name="longitude" value="${Number(co?.longitude || 0) || ""}" placeholder="Longitud" />
+          <input name="business_hours" value="${escapeHtml(co?.business_hours || "")}" placeholder="Horario de atencion" />
+          <textarea name="public_description" placeholder="Descripcion publica de la empresa">${escapeHtml(
+            co?.public_description || ""
+          )}</textarea>
+          <textarea name="public_features" placeholder='Caracteristicas publicas (JSON o texto separado por comas/saltos de linea)'>${escapeHtml(
+            co?.public_features || ""
+          )}</textarea>
+          <textarea name="public_mission" placeholder="Mision">${escapeHtml(co?.public_mission || "")}</textarea>
+          <textarea name="public_vision" placeholder="Vision">${escapeHtml(co?.public_vision || "")}</textarea>
         </div>
         ${logoPreview}
+        ${
+          co?.public_background_path
+            ? `<p><img src="${escapeHtml(co.public_background_path)}" alt="Fondo publico" style="max-width:260px;max-height:120px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb;" /></p>`
+            : "<p class='muted'>Sin fondo publico cargado.</p>"
+        }
+        <p class="muted">Vista publica: <a href="/public/${encodeURIComponent(slug)}/catalog" target="_blank" rel="noopener">/public/${escapeHtml(
+          slug
+        )}/catalog</a></p>
         <button type="submit">Guardar</button>
       </form>
       <h3 style="margin-top:28px">Sedes (ubicacion de caja)</h3>
@@ -2382,26 +4336,105 @@ app.post(
   "/company",
   requireAuth,
   requireModule("company_settings"),
-  uploadCompanyLogo.single("logo"),
+  uploadCompanyAssets.fields([
+    { name: "logo", maxCount: 1 },
+    { name: "public_background", maxCount: 1 },
+  ]),
   async (req, res) => {
     const { companyId } = req.session.user;
     const name = String(req.body.name || "").trim();
     const ruc = String(req.body.ruc || "").trim();
+    const slugRaw = String(req.body.slug || "").trim();
+    const slug = slugifyCompanyName(slugRaw);
+    const publicTitle = String(req.body.public_title || "").trim();
+    const publicDescription = String(req.body.public_description || "").trim();
+    const publicMission = String(req.body.public_mission || "").trim();
+    const publicVision = String(req.body.public_vision || "").trim();
+    const publicContact = String(req.body.public_contact || "").trim();
+    const email = String(req.body.email || "").trim();
+    const phone = String(req.body.phone || "").trim();
+    const whatsapp = String(req.body.whatsapp || "").trim();
+    const address = String(req.body.address || "").trim();
+    const city = String(req.body.city || "").trim();
+    const country = String(req.body.country || "").trim();
+    const latRaw = Number(req.body.latitude);
+    const lonRaw = Number(req.body.longitude);
+    const latitude = Number.isFinite(latRaw) ? latRaw : null;
+    const longitude = Number.isFinite(lonRaw) ? lonRaw : null;
+    const website = String(req.body.website || "").trim();
+    const businessHours = String(req.body.business_hours || "").trim();
+    const publicFeatures = String(req.body.public_features || "").trim();
     const rdRaw = Math.floor(Number(req.body.cash_reopen_days ?? 7));
     const cashReopenDays = Number.isFinite(rdRaw) ? Math.min(365, Math.max(1, rdRaw)) : 7;
     if (!name) return res.redirect("/company?error=Nombre+obligatorio");
-    let logoPath = null;
-    if (req.file) {
-      logoPath = `/uploads/company-logos/${req.file.filename}`;
-      await run("UPDATE companies SET name=?, ruc=?, logo_path=?, cash_reopen_days=? WHERE id=?;", [
+    if (!slug) return res.redirect("/company?error=Slug+publico+invalido");
+    const slugUsed = await get("SELECT id FROM companies WHERE slug=? AND id<>?;", [slug, companyId]);
+    if (slugUsed) return res.redirect("/company?error=Slug+ya+en+uso");
+    const files = req.files || {};
+    const logoFile = Array.isArray(files.logo) ? files.logo[0] : null;
+    const bgFile = Array.isArray(files.public_background) ? files.public_background[0] : null;
+    const logoPath = logoFile ? `/uploads/company-logos/${logoFile.filename}` : null;
+    const bgPath = bgFile ? `/uploads/company-backgrounds/${bgFile.filename}` : null;
+    if (logoPath || bgPath) {
+      await run(
+        `UPDATE companies
+         SET name=?, ruc=?, logo_path=COALESCE(?,logo_path), public_background_path=COALESCE(?,public_background_path), cash_reopen_days=?, slug=?, public_title=?, public_description=?, public_mission=?, public_vision=?, public_contact=?, email=?, phone=?, whatsapp=?, address=?, city=?, country=?, latitude=?, longitude=?, website=?, business_hours=?, public_features=?
+         WHERE id=?;`,
+        [
         name,
         ruc || null,
         logoPath,
+        bgPath,
         cashReopenDays,
+        slug,
+        publicTitle || null,
+        publicDescription || null,
+        publicMission || null,
+        publicVision || null,
+        publicContact || null,
+        email || null,
+        phone || null,
+        whatsapp || null,
+        address || null,
+        city || null,
+        country || null,
+        latitude,
+        longitude,
+        website || null,
+        businessHours || null,
+        publicFeatures || null,
         companyId,
-      ]);
+      ]
+      );
     } else {
-      await run("UPDATE companies SET name=?, ruc=?, cash_reopen_days=? WHERE id=?;", [name, ruc || null, cashReopenDays, companyId]);
+      await run(
+        `UPDATE companies
+         SET name=?, ruc=?, cash_reopen_days=?, slug=?, public_title=?, public_description=?, public_mission=?, public_vision=?, public_contact=?, email=?, phone=?, whatsapp=?, address=?, city=?, country=?, latitude=?, longitude=?, website=?, business_hours=?, public_features=?
+         WHERE id=?;`,
+        [
+          name,
+          ruc || null,
+          cashReopenDays,
+          slug,
+          publicTitle || null,
+          publicDescription || null,
+          publicMission || null,
+          publicVision || null,
+          publicContact || null,
+          email || null,
+          phone || null,
+          whatsapp || null,
+          address || null,
+          city || null,
+          country || null,
+          latitude,
+          longitude,
+          website || null,
+          businessHours || null,
+          publicFeatures || null,
+          companyId,
+        ]
+      );
     }
     req.session.user.companyName = name;
     req.session.user.companyRuc = ruc;
@@ -2436,7 +4469,7 @@ app.post("/company/branches/:id/activate", requireAuth, requireModule("company_s
 });
 
 app.get("/sales/cash-registers", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
-  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  const { companyId, companyName, companyLogoPath, username, allowedModules, id: userId } = req.session.user;
   await ensureSalesDefaults(companyId);
   const open = await getOpenCashRegister(companyId, userId);
   const approver = await isApprover(companyId, userId);
@@ -2582,6 +4615,7 @@ app.get("/sales/cash-registers", requireAuth, requireModule("sales_cash_register
     title: "Cajas",
     subtitle: "Apertura y cierre por usuario",
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "sales",
@@ -2592,7 +4626,7 @@ app.get("/sales/cash-registers", requireAuth, requireModule("sales_cash_register
 });
 
 app.get("/sales/cash-audit", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
-  const { companyId, companyName, username, allowedModules } = req.session.user;
+  const { companyId, companyName, companyLogoPath, username, allowedModules } = req.session.user;
   const from = String(req.query.from || "").trim();
   const to = String(req.query.to || "").trim();
   const filterUserId = req.query.userId != null && String(req.query.userId).trim() !== "" ? Number(req.query.userId) : null;
@@ -2653,6 +4687,7 @@ app.get("/sales/cash-audit", requireAuth, requireModule("sales_cash_registers"),
     title: "Arqueo de cajas",
     subtitle: "Solo reporte de cajas cerradas",
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "sales",
@@ -2674,7 +4709,7 @@ app.get("/sales/cash-audit", requireAuth, requireModule("sales_cash_registers"),
 });
 
 app.get("/sales/cash-registers/closed", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
-  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  const { companyId, companyName, companyLogoPath, username, allowedModules, id: userId } = req.session.user;
   if (!(await isApprover(companyId, userId))) return res.status(403).send("Solo aprobadores pueden ver esta lista.");
   const err = req.query.error ? `<div class="error">${escapeHtml(decodeURIComponent(String(req.query.error).replace(/\+/g, " ")))}</div>` : "";
   const days = await getCompanyCashReopenDays(companyId);
@@ -2715,6 +4750,7 @@ app.get("/sales/cash-registers/closed", requireAuth, requireModule("sales_cash_r
     title: "Cajas cerradas",
     subtitle: `Ultimos ${days} dias`,
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "sales",
@@ -2728,7 +4764,7 @@ app.get("/sales/cash-registers/closed", requireAuth, requireModule("sales_cash_r
 });
 
 app.get("/sales/cash-registers/:id/close-form", requireAuth, requireModule("sales_cash_registers"), async (req, res) => {
-  const { companyId, companyName, username, allowedModules, id: userId } = req.session.user;
+  const { companyId, companyName, companyLogoPath, username, allowedModules, id: userId } = req.session.user;
   const rid = Number(req.params.id);
   const reg = await get("SELECT * FROM cash_registers WHERE id=? AND company_id=? AND user_id=?;", [rid, companyId, userId]);
   if (!reg || reg.status !== "ABIERTA") return res.redirect("/sales/cash-registers?error=Caja+invalida");
@@ -2757,6 +4793,7 @@ app.get("/sales/cash-registers/:id/close-form", requireAuth, requireModule("sale
     title: "Cierre de caja",
     subtitle: `Caja #${rid} — ${escapeHtml(reg.accounting_date)}`,
     companyName,
+    companyLogoPath,
     username,
     allowedModules,
     activeGroup: "sales",
@@ -3011,6 +5048,7 @@ app.get("/sales/pos", requireAuth, requireModule("sales_pos"), async (req, res) 
     title: "Post venta (POS)",
     subtitle: `Caja #${reg.id} — ${escapeHtml(reg.accounting_date)}`,
     companyName,
+    companyLogoPath: req.session.user.companyLogoPath || "",
     username,
     allowedModules,
     activeGroup: "sales",
@@ -4308,92 +6346,8 @@ app.get("/sales/reports", requireAuth, requireModule("sales_reports"), async (re
   res.send(renderLayout("Reportes ventas", html));
 });
 
-app.get("/dashboard", requireAuth, requireModule("dashboard"), async (req, res) => {
-  const { companyId, companyName, username, allowedModules } = req.session.user;
-
-  const counts = await all(
-    `SELECT 
-      COUNT(*) as total,
-      SUM(CASE WHEN status = 'Abierto' THEN 1 ELSE 0 END) as abiertos,
-      SUM(CASE WHEN status = 'En proceso' THEN 1 ELSE 0 END) as en_proceso,
-      SUM(CASE WHEN status = 'Cerrado' THEN 1 ELSE 0 END) as cerrados
-    FROM claims WHERE company_id = ?;`,
-    [companyId]
-  );
-
-  const metrics = counts[0] || { total: 0, abiertos: 0, en_proceso: 0, cerrados: 0 };
-  const claims = await all(
-    "SELECT code, customer_name, product, status, created_at FROM claims WHERE company_id = ? ORDER BY id DESC LIMIT 10;",
-    [companyId]
-  );
-
-  const claimRows = claims
-    .map(
-      (c) => `<tr>
-      <td>${escapeHtml(c.code)}</td>
-      <td>${escapeHtml(c.customer_name)}</td>
-      <td>${escapeHtml(c.product)}</td>
-      <td>${escapeHtml(c.status)}</td>
-      <td>${escapeHtml(c.created_at)}</td>
-    </tr>`
-    )
-    .join("");
-
-  const lowStockProducts = await all(
-    `SELECT name, current_stock, reorder_level
-     FROM products
-     WHERE company_id = ? AND current_stock <= reorder_level
-     ORDER BY current_stock ASC, name ASC
-     LIMIT 8;`,
-    [companyId]
-  );
-  const lowStockRows = lowStockProducts
-    .map(
-      (p) => `<tr><td>${escapeHtml(p.name)}</td><td>${p.current_stock}</td><td>${p.reorder_level}</td></tr>`
-    )
-    .join("");
-
-  const html = renderAppShell({
-    title: "Dashboard Post Venta",
-    subtitle: "Resumen operativo y registro rapido de casos",
-    companyName,
-    username,
-    allowedModules,
-    activeGroup: "home",
-    activeSection: "dashboard",
-    body: `
-      <div class="row">
-        <div class="card">Total casos<strong>${metrics.total || 0}</strong></div>
-        <div class="card">Abiertos<strong>${metrics.abiertos || 0}</strong></div>
-        <div class="card">En proceso<strong>${metrics.en_proceso || 0}</strong></div>
-        <div class="card">Cerrados<strong>${metrics.cerrados || 0}</strong></div>
-      </div>
-      <h3>Registrar nuevo caso</h3>
-      <form method="post" action="/claims">
-        <div class="form-grid">
-          <input name="customerName" placeholder="Cliente" required />
-          <input name="product" placeholder="Electrodomestico" required />
-          <input name="issue" placeholder="Problema reportado" required />
-          <select name="status" required>
-            <option>Abierto</option>
-            <option>En proceso</option>
-            <option>Cerrado</option>
-          </select>
-        </div>
-        <button type="submit">Guardar caso</button>
-      </form>
-      <h3 style="margin-top:18px">Ultimos casos de tu empresa</h3>
-      <table>
-        <thead><tr><th>Codigo</th><th>Cliente</th><th>Producto</th><th>Estado</th><th>Fecha</th></tr></thead>
-        <tbody>${claimRows || "<tr><td colspan='5'>Sin registros</td></tr>"}</tbody>
-      </table>
-      <h3 style="margin-top:18px">Alertas de bajo stock</h3>
-      <table>
-        <thead><tr><th>Producto</th><th>Stock actual</th><th>Minimo</th></tr></thead>
-        <tbody>${lowStockRows || "<tr><td colspan='3'>No hay alertas por ahora</td></tr>"}</tbody>
-      </table>`,
-  });
-  res.send(renderLayout("Dashboard", html));
+app.get("/dashboard", requireAuth, (req, res) => {
+  return res.redirect("/modules/logistics");
 });
 
 app.post("/claims", requireAuth, async (req, res) => {
@@ -4406,7 +6360,7 @@ app.post("/claims", requireAuth, async (req, res) => {
     "INSERT INTO claims(code, customer_name, product, issue, status, company_id) VALUES (?, ?, ?, ?, ?, ?);",
     [code, customerName, product, issue, status, companyId]
   );
-  res.redirect("/dashboard");
+  res.redirect("/modules/logistics");
 });
 
 app.get("/workers", requireAuth, requireModule("workers"), async (req, res) => {
@@ -4430,6 +6384,10 @@ app.get("/workers", requireAuth, requireModule("workers"), async (req, res) => {
       <td>${escapeHtml(w.status)}</td>
     </tr>`
     )
+    .join("");
+  const profiles = await all("SELECT id, name FROM profiles WHERE company_id = ? ORDER BY name;", [companyId]);
+  const profileOptions = profiles
+    .map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`)
     .join("");
 
   const html = renderAppShell({
@@ -4460,8 +6418,35 @@ app.get("/workers", requireAuth, requireModule("workers"), async (req, res) => {
           <input name="phone" placeholder="Celular / Telefono" />
           <input name="email" placeholder="Correo" />
         </div>
+        <div class="card" style="margin-top:10px">
+          <h4 style="margin:0 0 8px">Acceso al sistema (opcional)</h4>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            <input type="checkbox" id="createAccessSwitch" name="createAccess" value="1" style="width:auto" />
+            <span>Crear usuario para este trabajador</span>
+          </label>
+          <div id="accessFields" class="form-grid" style="display:none">
+            <input name="accessEmail" placeholder="Correo electronico (identificador principal)" />
+            <input name="accessUsername" placeholder="Username interno (opcional)" />
+            <input name="tempPassword" placeholder="Contrasena temporal" />
+            <select name="profileId">
+              <option value="">Selecciona perfil</option>
+              ${profileOptions}
+            </select>
+          </div>
+          <p class="muted" style="margin:8px 0 0">Si esta opcion esta desactivada, solo se crea el trabajador.</p>
+        </div>
         <button type="submit">Guardar trabajador</button>
       </form>
+      <script>
+        (function(){
+          const sw = document.getElementById('createAccessSwitch');
+          const fields = document.getElementById('accessFields');
+          if(!sw || !fields) return;
+          function sync(){ fields.style.display = sw.checked ? 'grid' : 'none'; }
+          sw.addEventListener('change', sync);
+          sync();
+        })();
+      </script>
       <h3 style="margin-top:18px">Trabajadores activos</h3>
       <table>
         <thead><tr><th>ID</th><th>Nombre</th><th>Documento</th><th>Telefono</th><th>Correo</th><th>Estado</th></tr></thead>
@@ -4473,6 +6458,11 @@ app.get("/workers", requireAuth, requireModule("workers"), async (req, res) => {
 
 app.post("/workers", requireAuth, requireModule("workers"), async (req, res) => {
   const { firstName, lastName, documentType, documentNumber, phone, email } = req.body;
+  const createAccess = String(req.body.createAccess || "") === "1";
+  const accessEmail = String(req.body.accessEmail || "").trim();
+  const accessUsernameRaw = String(req.body.accessUsername || "").trim();
+  const tempPassword = String(req.body.tempPassword || "").trim();
+  const profileId = Number(req.body.profileId || 0);
   const companyId = req.session.user.companyId;
   try {
     await run(
@@ -4480,6 +6470,34 @@ app.post("/workers", requireAuth, requireModule("workers"), async (req, res) => 
        VALUES (?, ?, ?, ?, ?, ?, ?);`,
       [companyId, firstName, lastName, documentType, documentNumber, phone || "", email || ""]
     );
+    if (createAccess) {
+      if (!req.session.user.allowedModules.includes("users")) {
+        return res.redirect("/workers?error=No+tienes+permiso+para+crear+usuarios");
+      }
+      if (!accessEmail) {
+        return res.redirect("/workers?error=Correo+obligatorio+para+crear+acceso");
+      }
+      if (!tempPassword) {
+        return res.redirect("/workers?error=Contrasena+temporal+obligatoria+para+crear+acceso");
+      }
+      const profile = await get("SELECT id FROM profiles WHERE id = ? AND company_id = ?;", [profileId, companyId]);
+      if (!profile) return res.redirect("/workers?error=Perfil+invalido+para+crear+acceso");
+      const createdWorker = await get(
+        "SELECT id FROM workers WHERE company_id=? AND document_number=? ORDER BY id DESC LIMIT 1;",
+        [companyId, documentNumber]
+      );
+      if (!createdWorker) return res.redirect("/workers?error=No+se+pudo+vincular+el+usuario+al+trabajador");
+      const finalUsername = accessUsernameRaw || accessEmail;
+      const existsUsername = await get("SELECT id FROM users WHERE username = ?;", [finalUsername]);
+      if (existsUsername) return res.redirect("/workers?error=El+identificador+de+acceso+ya+existe");
+      const existsWorkerUser = await get("SELECT id FROM users WHERE worker_id = ?;", [createdWorker.id]);
+      if (existsWorkerUser) return res.redirect("/workers?error=El+trabajador+ya+tiene+usuario");
+      await run(
+        "INSERT INTO users(username, password, company_id, worker_id, role, profile_id) VALUES (?, ?, ?, ?, ?, ?);",
+        [finalUsername, tempPassword, companyId, createdWorker.id, "agent", profileId]
+      );
+      return res.redirect("/workers?ok=Trabajador+y+usuario+creados+correctamente");
+    }
     return res.redirect("/workers?ok=Trabajador+registrado+correctamente");
   } catch {
     return res.redirect("/workers?error=Documento+ya+registrado+en+esta+empresa");
@@ -4517,7 +6535,7 @@ app.get("/users", requireAuth, requireModule("users"), async (req, res) => {
     .join("");
 
   const users = await all(
-    `SELECT u.id, u.username, u.status, p.name AS profile_name, w.first_name, w.last_name
+    `SELECT u.id, u.username, u.status, p.name AS profile_name, w.first_name, w.last_name, IFNULL(w.email,'') AS worker_email
      FROM users u
      LEFT JOIN profiles p ON p.id = u.profile_id
      LEFT JOIN workers w ON w.id = u.worker_id
@@ -4532,11 +6550,17 @@ app.get("/users", requireAuth, requireModule("users"), async (req, res) => {
       <td>${escapeHtml(u.username)}</td>
       <td>${escapeHtml(u.profile_name || u.role || "Sin perfil")}</td>
       <td>${escapeHtml(u.last_name && u.first_name ? `${u.last_name}, ${u.first_name}` : "Sin trabajador")}</td>
+      <td>${escapeHtml(u.worker_email || "-")}</td>
       <td>${escapeHtml(u.status || "ACTIVO")}</td>
       <td><a class="badge" href="/users/${u.id}/edit">Editar</a></td>
       <td>
         <form method="post" action="/users/${u.id}/toggle-status" style="margin:0;">
           <button type="submit" class="btn-compact">${u.status === "ACTIVO" ? "Desactivar" : "Activar"}</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/users/${u.id}/reset-password" style="margin:0;">
+          <button type="submit" class="btn-compact">Resetear</button>
         </form>
       </td>
     </tr>`
@@ -4575,8 +6599,8 @@ app.get("/users", requireAuth, requireModule("users"), async (req, res) => {
       </form>
       <h3 style="margin-top:18px">Usuarios de la empresa</h3>
       <table>
-        <thead><tr><th>ID</th><th>Username</th><th>Perfil</th><th>Trabajador</th><th>Estado</th><th>Editar</th><th>Activar/Desactivar</th></tr></thead>
-        <tbody>${rows || "<tr><td colspan='7'>Sin usuarios creados</td></tr>"}</tbody>
+        <thead><tr><th>ID</th><th>Identificador</th><th>Perfil</th><th>Trabajador</th><th>Correo</th><th>Estado</th><th>Editar</th><th>Activar/Desactivar</th><th>Contrasena</th></tr></thead>
+        <tbody>${rows || "<tr><td colspan='9'>Sin usuarios creados</td></tr>"}</tbody>
       </table>`,
   });
   res.send(renderLayout("Usuarios", html));
@@ -4693,6 +6717,16 @@ app.post("/users/:id/toggle-status", requireAuth, requireModule("users"), async 
   const next = user.status === "ACTIVO" ? "INACTIVO" : "ACTIVO";
   await run("UPDATE users SET status = ? WHERE id = ? AND company_id = ?;", [next, userId, companyId]);
   return res.redirect(`/users?ok=Usuario+${next === "ACTIVO" ? "activado" : "desactivado"}`);
+});
+
+app.post("/users/:id/reset-password", requireAuth, requireModule("users"), async (req, res) => {
+  const { companyId } = req.session.user;
+  const userId = Number(req.params.id);
+  const user = await get("SELECT id FROM users WHERE id=? AND company_id=?;", [userId, companyId]);
+  if (!user) return res.redirect("/users?error=Usuario+no+encontrado");
+  const temp = `Tmp${Math.random().toString(36).slice(2, 8)}!`;
+  await run("UPDATE users SET password=? WHERE id=? AND company_id=?;", [temp, userId, companyId]);
+  return res.redirect(`/users?ok=Contrasena+temporal+generada:+${encodeURIComponent(temp)}`);
 });
 
 app.get("/brands", requireAuth, requireModule("brands"), async (req, res) => {
@@ -5456,8 +7490,8 @@ app.get("/approvers", requireAuth, requireModule("approvers"), async (req, res) 
     .join("");
 
   const html = renderAppShell({
-    title: "Aprobadores",
-    subtitle: "Configura quienes aprueban comprobantes",
+    title: "Flujos de aprobacion",
+    subtitle: "Configura responsables para procesos de aprobacion",
     companyName,
     username,
     allowedModules,
@@ -5469,7 +7503,7 @@ app.get("/approvers", requireAuth, requireModule("approvers"), async (req, res) 
         rows || "<tr><td colspan='5'>Sin usuarios</td></tr>"
       }</tbody></table>`,
   });
-  res.send(renderLayout("Aprobadores", html));
+  res.send(renderLayout("Flujos de aprobacion", html));
 });
 
 app.post("/approvers/toggle", requireAuth, requireModule("approvers"), async (req, res) => {
@@ -6894,7 +8928,7 @@ app.get("/profiles", requireAuth, requireModule("profiles"), async (req, res) =>
       ? editAccessMap[moduleDef.key]
         ? "checked"
         : ""
-      : moduleDef.key === "dashboard"
+      : moduleDef.key === "products" || moduleDef.key === "stock"
       ? "checked"
       : "";
     return `<label style="display:flex; align-items:center; gap:8px;">
